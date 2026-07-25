@@ -124,28 +124,105 @@ function startStaticServer() {
         </td>
       </tr>
     `).join('');
-    const html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"/><title>列表</title><script>
+    const html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"/><title>书籍管理</title><style>
+      body{margin:0;font-family:'Segoe UI','Helvetica Neue',Arial,sans-serif;background:#f4f7fb;color:#0f172a;}
+      .container{max-width:1120px;margin:32px auto;padding:0 20px;}
+      .header{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap;margin-bottom:24px;}
+      .header-title{margin:0;line-height:1.1;}
+      .header-title h1{font-size:32px;margin:0;color:#0f172a;}
+      .header-title p{margin:8px 0 0;color:#475569;font-size:15px;}
+      .btn{display:inline-flex;align-items:center;justify-content:center;padding:12px 20px;border-radius:14px;border:none;font-weight:600;cursor:pointer;transition:all .2s ease;}
+      .btn-primary{background:#2563eb;color:#fff;box-shadow:0 18px 40px rgba(37,99,235,.18);}
+      .btn-primary:hover{transform:translateY(-1px);}
+      .table-wrap{background:#fff;border-radius:24px;box-shadow:0 24px 60px rgba(15,23,42,.08);overflow:hidden;}
+      table{width:100%;border-collapse:collapse;min-width:720px;}
+      th,td{padding:18px 20px;vertical-align:middle;}
+      thead{background:#f8fafc;}
+      th{font-weight:700;color:#334155;text-align:left;border-bottom:1px solid #e2e8f0;}
+      td{border-bottom:1px solid #e2e8f0;color:#475569;}
+      tr:hover td{background:#f8fafc;}
+      .action-link{color:#2563eb;text-decoration:none;font-weight:600;margin-right:16px;}
+      .action-link:hover{text-decoration:underline;}
+      .message{display:none;padding:14px 18px;border-radius:16px;margin-bottom:20px;box-shadow:0 16px 30px rgba(15,23,42,.08);}
+      .message.info{background:#eff6ff;color:#0369a1;}
+      .message.error{background:#fee2e2;color:#991b1b;}
+      .modal{position:fixed;inset:0;background:rgba(15,23,42,.55);display:none;align-items:center;justify-content:center;z-index:1000;}
+      .modal.active{display:flex;}
+      .modal-panel{width:100%;max-width:640px;background:#fff;border-radius:28px;overflow:hidden;box-shadow:0 40px 100px rgba(15,23,42,.18);}
+      .modal-header{display:flex;justify-content:space-between;align-items:center;padding:24px 28px;border-bottom:1px solid #e2e8f0;}
+      .modal-header h2{margin:0;font-size:22px;color:#0f172a;}
+      .close-btn{border:none;background:transparent;color:#64748b;font-size:26px;cursor:pointer;line-height:1;}
+      .modal-body{padding:24px 28px;}
+      .field{margin-bottom:18px;}
+      .field label{display:block;margin-bottom:8px;font-size:14px;color:#475569;}
+      .field input[type=text],.field textarea,.field input[type=file]{width:100%;padding:14px 16px;border:1px solid #cbd5e1;border-radius:16px;background:#f8fafc;color:#0f172a;font-size:15px;}
+      .field textarea{min-height:120px;resize:vertical;}
+      .modal-footer{padding:20px 28px 28px;text-align:right;background:#f8fafc;}
+      .modal-footer .btn-secondary{margin-right:12px;background:#f8fafc;color:#334155;}
+      .hint{font-size:13px;color:#64748b;margin-top:6px;}
+    </style></head><body>
+    <div class="container">
+      <div class="header">
+        <div class="header-title">
+          <h1>书籍管理</h1>
+          <p>通过此页面管理已上传的书籍，并可以打开本地文件夹查看内容。</p>
+        </div>
+        <button class="btn btn-primary" onclick="showModal()">新增书籍</button>
+      </div>
+      <div id="message" class="message info"></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>书名</th><th>大小</th><th>封面</th><th>操作</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </div>
+    <div id="bookModal" class="modal">
+      <div class="modal-panel">
+        <div class="modal-header">
+          <h2>新增书籍</h2>
+          <button class="close-btn" onclick="hideModal()">×</button>
+        </div>
+        <form id="uploadForm" method="post" action="/data-operate/submitForm" enctype="multipart/form-data">
+          <div class="modal-body">
+            <div class="field"><label>文件</label><input type="file" name="file" required /></div>
+            <div class="field"><label>书名</label><input type="text" name="bookName" required /></div>
+            <div class="field"><label>作者</label><input type="text" name="authorName" /></div>
+            <div class="field"><label>描述</label><textarea name="desc"></textarea></div>
+            <div class="field"><label>封面</label><input type="text" name="coverImg" placeholder="封面 URL，可选" /></div>
+            <div class="hint">提交后书籍会保存至本地目录，删除操作会从数据库中移除记录。</div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" onclick="hideModal()">取消</button>
+            <button type="submit" class="btn btn-primary">提交</button>
+          </div>
+        </form>
+      </div>
+    </div>
+    <script>
+      function showModal(){document.getElementById('bookModal').classList.add('active');}
+      function hideModal(){document.getElementById('bookModal').classList.remove('active');}
+      function showMessage(text,type='info'){
+        const msg=document.getElementById('message');
+        msg.textContent=text;
+        msg.className='message '+(type==='error'?'error':'info');
+        msg.style.display='block';
+        clearTimeout(window._msgTimer);
+        window._msgTimer=setTimeout(()=>{msg.style.display='none';},4500);
+      }
       function deleteBook(id){
-        if(confirm('删除？')){
-          fetch('/data-operate/delete?id='+encodeURIComponent(id)).then((response)=>{
-            if(response.ok){
-              location.reload();
-            } else {
-              response.text().then(text => alert('删除失败: '+text));
-            }
-          });
-        }
+        if(!confirm('确认删除该书籍？')){return;}
+        fetch('/data-operate/delete?id='+encodeURIComponent(id)).then((response)=>{
+          if(response.ok){showMessage('删除成功');setTimeout(()=>location.reload(),500);}else{response.text().then(text=>showMessage('删除失败: '+text,'error'));}
+        }).catch((err)=>showMessage('删除失败: '+err.message,'error'));
       }
       function openFolder(id){
         fetch('/open-folder?id='+encodeURIComponent(id)).then((response)=>{
-          if(response.ok){
-            alert('已打开书籍所在文件夹');
-          } else {
-            response.text().then(text=>alert('打开失败: '+text));
-          }
-        }).catch((err)=>alert('打开失败: '+err.message));
+          if(response.ok){showMessage('已打开书籍所在文件夹');}else{response.text().then(text=>showMessage('打开失败: '+text,'error'));}
+        }).catch((err)=>showMessage('打开失败: '+err.message,'error'));
       }
-    </script></head><body><button onclick="document.getElementById('upload-form').style.display='block'">新增</button><div id="upload-form" style="display:none"><form id="uploadForm" method="post" action="/data-operate/submitForm" enctype="multipart/form-data"><div><label>文件:</label><input type="file" name="file"/></div><div><label>书名:</label><input name="bookName"/></div><div><label>作者:</label><input name="authorName"/></div><div><label>描述:</label><textarea name="desc"></textarea></div><div><label>封面:</label><input name="coverImg"/></div><button type="submit">提交</button></form></div><table border="1" cellpadding="8"><thead><tr><th>书名</th><th>大小</th><th>封面</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></body></html>`;
+    </script>
+  </body></html>`;
     res.send(html);
   });
 
