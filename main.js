@@ -113,16 +113,17 @@ function startStaticServer() {
   appServer.get('/', async (req, res) => {
     const books = database.listBooks();
     const rows = books.map((book) => `
-      <tr>
-        <td><a href="/detail?id=${book.id}">${book.title}</a></td>
-        <td>${book.size}</td>
-        <td>${book.coverImg}</td>
-        <td>
-          <a href="#" onclick="deleteBook(${book.id});return false;">删除</a>
-          &nbsp;|&nbsp;
-          <a href="#" onclick="openFolder(${book.id});return false;">打开文件夹</a>
-        </td>
-      </tr>
+      <li class="book-item">
+        <div class="book-meta">
+          <h3><a href="/detail?id=${book.id}">${book.title}</a></h3>
+          <p>大小：${book.size}</p>
+          <p>封面：${book.coverImg || '—'}</p>
+        </div>
+        <div class="book-actions">
+          <a class="action-link" href="#" onclick="deleteBook(${book.id});return false;">删除</a>
+          <a class="action-link" href="#" onclick="openFolder(${book.id});return false;">打开文件夹</a>
+        </div>
+      </li>
     `).join('');
     const html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"/><title>书籍管理</title><style>
       body{margin:0;font-family:'Segoe UI','Helvetica Neue',Arial,sans-serif;background:#f4f7fb;color:#0f172a;}
@@ -134,14 +135,14 @@ function startStaticServer() {
       .btn{display:inline-flex;align-items:center;justify-content:center;padding:12px 20px;border-radius:14px;border:none;font-weight:600;cursor:pointer;transition:all .2s ease;}
       .btn-primary{background:#2563eb;color:#fff;box-shadow:0 18px 40px rgba(37,99,235,.18);}
       .btn-primary:hover{transform:translateY(-1px);}
-      .table-wrap{background:#fff;border-radius:24px;box-shadow:0 24px 60px rgba(15,23,42,.08);overflow:hidden;}
-      table{width:100%;border-collapse:collapse;min-width:720px;}
-      th,td{padding:18px 20px;vertical-align:middle;}
-      thead{background:#f8fafc;}
-      th{font-weight:700;color:#334155;text-align:left;border-bottom:1px solid #e2e8f0;}
-      td{border-bottom:1px solid #e2e8f0;color:#475569;}
-      tr:hover td{background:#f8fafc;}
-      .action-link{color:#2563eb;text-decoration:none;font-weight:600;margin-right:16px;}
+      .book-list{list-style:none;margin:0;padding:0;display:grid;gap:16px;}
+      .book-item{display:flex;justify-content:space-between;align-items:center;gap:18px;padding:20px 24px;border-radius:24px;background:#fff;box-shadow:0 18px 40px rgba(15,23,42,.08);}
+      .book-meta{min-width:0;}
+      .book-meta h3{margin:0 0 8px;font-size:20px;color:#0f172a;}
+      .book-meta h3 a{color:inherit;text-decoration:none;}
+      .book-meta p{margin:0;color:#475569;font-size:14px;line-height:1.6;}
+      .book-actions{display:flex;gap:16px;}
+      .action-link{color:#2563eb;text-decoration:none;font-weight:600;}
       .action-link:hover{text-decoration:underline;}
       .message{display:none;padding:14px 18px;border-radius:16px;margin-bottom:20px;box-shadow:0 16px 30px rgba(15,23,42,.08);}
       .message.info{background:#eff6ff;color:#0369a1;}
@@ -170,12 +171,7 @@ function startStaticServer() {
         <button class="btn btn-primary" onclick="showModal()">新增书籍</button>
       </div>
       <div id="message" class="message info"></div>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>书名</th><th>大小</th><th>封面</th><th>操作</th></tr></thead>
-          <tbody>${rows}</tbody>
-        </table>
-      </div>
+      <ul id="books" class="book-list">${rows}</ul>
     </div>
     <div id="bookModal" class="modal">
       <div class="modal-panel">
@@ -183,7 +179,7 @@ function startStaticServer() {
           <h2>新增书籍</h2>
           <button class="close-btn" onclick="hideModal()">×</button>
         </div>
-        <form id="uploadForm" method="post" action="/data-operate/submitForm" enctype="multipart/form-data">
+        <form id="uploadForm" method="post" enctype="multipart/form-data" onsubmit="submitForm(event)">
           <div class="modal-body">
             <div class="field"><label>文件</label><input type="file" name="file" required /></div>
             <div class="field"><label>书名</label><input type="text" name="bookName" required /></div>
@@ -209,6 +205,28 @@ function startStaticServer() {
         msg.style.display='block';
         clearTimeout(window._msgTimer);
         window._msgTimer=setTimeout(()=>{msg.style.display='none';},4500);
+      }
+      async function submitForm(event){
+        event.preventDefault();
+        const form = event.currentTarget;
+        const formData = new FormData(form);
+        try {
+          const response = await fetch('/data-operate/submitForm', {
+            method: 'POST',
+            body: formData
+          });
+          if (!response.ok) {
+            const text = await response.text();
+            throw new Error(text || '提交失败');
+          }
+          const result = await response.json();
+          showMessage('提交成功');
+          hideModal();
+          form.reset();
+          setTimeout(()=>location.reload(),500);
+        } catch (error) {
+          showMessage(error.message || '提交失败','error');
+        }
       }
       function deleteBook(id){
         if(!confirm('确认删除该书籍？')){return;}
@@ -250,7 +268,17 @@ function startStaticServer() {
     }
     const chapters = parseTextToChapters(fs.readFileSync(book.storedPath, 'utf8'), await loadRules(rulesPath));
     const items = chapters.map((chapter, index) => `<li><a href="/content?id=${encodeURIComponent(crypto.createHash('md5').update(book.id + '-' + index).digest('hex'))}&bookId=${book.id}">${chapter.title}</a></li>`).join('');
-    const html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"/><title>目录页面</title></head><body><h1>${book.title} 目录</h1><ul>${items}</ul></body></html>`;
+    const html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"/><title>目录页面</title><style>
+      body{margin:0;font-family:'Segoe UI','Helvetica Neue',Arial,sans-serif;background:#f4f7fb;color:#0f172a;}
+      .page{max-width:900px;margin:32px auto;padding:0 20px;}
+      h1{font-size:28px;margin-bottom:18px;color:#111827;}
+      #chapter{background:#fff;border-radius:24px;padding:24px 28px;box-shadow:0 20px 50px rgba(15,23,42,.08);}
+      #books{list-style:none;margin:0;padding:0;}
+      #books li{padding:16px 18px;border-bottom:1px solid #e2e8f0;}
+      #books li:last-child{border-bottom:none;}
+      #books li a{color:#2563eb;text-decoration:none;font-size:16px;font-weight:500;}
+      #books li a:hover{text-decoration:underline;}
+    </style></head><body><div class="page"><h1>${book.title} 目录</h1><div id="chapter"><ul id="books">${items}</ul></div></div></body></html>`;
     res.send(html);
   });
 
