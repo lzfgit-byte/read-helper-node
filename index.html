@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Reader Helper</title>
+  <style>
+    body { margin: 0; font-family: sans-serif; background: #f4f4f4; }
+    .layout { display: grid; grid-template-columns: 240px 1fr; min-height: 100vh; }
+    .sidebar { background: #1f2937; color: #fff; padding: 24px 16px; }
+    .sidebar h1 { font-size: 20px; margin: 0 0 24px; }
+    .menu { list-style: none; padding: 0; margin: 0; }
+    .menu li { margin-bottom: 12px; }
+    .menu button { width: 100%; text-align: left; padding: 12px 14px; color: #fff; background: transparent; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; }
+    .menu button.active, .menu button:hover { background: #374151; }
+    .content { padding: 24px; }
+    .section { display: none; }
+    .section.active { display: block; }
+    .panel { background: #fff; border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 8px 24px rgba(0,0,0,.08); }
+    .panel h2 { margin-top: 0; }
+    .field { margin-bottom: 14px; }
+    .help-text { margin: 4px 0 14px; font-size: 12px; color: #6b7280; }
+    input, textarea, select, button { width: 100%; padding: 10px 12px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 14px; }
+    textarea { resize: vertical; }
+    button { cursor: pointer; background: #2563eb; color: #fff; border: none; }
+    button:hover { background: #1d4ed8; }
+    .grid-2 { display: grid; gap: 16px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    table { width: 100%; border-collapse: collapse; }
+    table th, table td { border: 1px solid #e5e7eb; padding: 10px; text-align: left; }
+    table th { background: #f8fafc; }
+    .actions button { margin-right: 8px; width: auto; }
+    .html-list a { display: block; margin-bottom: 10px; color: #2563eb; text-decoration: none; }
+    .html-list a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <h1>Reader Helper</h1>
+      <ul class="menu">
+        <li><button class="menu-item active" data-target="upload-section">上传管理</button></li>
+        <li><button class="menu-item" data-target="books-section">书籍列表</button></li>
+        <li><button class="menu-item" data-target="rules-section">章节规则</button></li>
+        <li><button class="menu-item" data-target="html-section">HTML 服务</button></li>
+        <li><button class="menu-item" data-target="result-section">解析结果</button></li>
+      </ul>
+    </aside>
+
+    <main class="content">
+      <section id="upload-section" class="section active">
+        <div class="panel">
+          <h2>上传书籍</h2>
+          <div class="field"><button id="select-file">选择 TXT 文件</button></div>
+          <div class="grid-2">
+            <div class="field"><input id="book-title" placeholder="书名" /></div>
+            <div class="field"><input id="book-author" placeholder="作者" /></div>
+          </div>
+          <div class="field"><textarea id="book-desc" rows="3" placeholder="简介"></textarea></div>
+          <div class="field"><input id="book-cover" placeholder="封面 URL（可选）" /></div>
+          <div class="field"><button id="upload-book">上传并保存</button></div>
+          <div class="field"><span id="upload-status"></span></div>
+        </div>
+      </section>
+
+      <section id="books-section" class="section">
+        <div class="panel">
+          <h2>书籍列表</h2>
+          <table>
+            <thead>
+              <tr><th>书名</th><th>作者</th><th>简介</th><th>大小</th><th>操作</th></tr>
+            </thead>
+            <tbody id="book-list"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="rules-section" class="section">
+        <div class="panel">
+          <h2>解析规则</h2>
+          <div class="field"><input id="rule-prefix" placeholder="章节前缀，例如：第" /></div>
+          <div class="help-text">仅在标题检测中使用该前缀，例如“第”。</div>
+          <div class="field"><input id="rule-suffixes" placeholder="章节后缀，例如：章,回,节" /></div>
+          <div class="help-text">多个后缀用逗号分隔，标题以这些后缀结尾时会被识别。</div>
+          <div class="field"><input id="rule-max-title-length" placeholder="章节最大长度" type="number" /></div>
+          <div class="help-text">超过该长度则不会判断为章节标题。</div>
+          <div class="field"><label><input id="rule-empty-line" type="checkbox" /> 启用空行判断</label></div>
+          <div class="field"><button id="save-rules">保存解析规则</button></div>
+        </div>
+      </section>
+
+      <section id="html-section" class="section">
+        <div class="panel">
+          <h2>HTML 服务</h2>
+          <div class="grid-2">
+            <div class="field"><button id="start-server">启动 HTTP 服务</button></div>
+            <div class="field"><button id="open-service-page">打开服务页面</button></div>
+          </div>
+          <div class="field"><div id="server-status" style="padding:10px 12px; border:1px solid #d1d5db; border-radius:8px; background:#f9fafb; color:#111827;">服务未启动</div></div>
+        </div>
+      </section>
+
+      <section id="result-section" class="section">
+        <div class="panel">
+          <h2>解析结果</h2>
+          <div id="chapter-output"></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    let selectedFilePath = null;
+    let lastServerUrl = null;
+
+    function switchSection(targetId) {
+      document.querySelectorAll('.section').forEach((section) => {
+        section.classList.toggle('active', section.id === targetId);
+      });
+      document.querySelectorAll('.menu-item').forEach((button) => {
+        button.classList.toggle('active', button.dataset.target === targetId);
+      });
+    }
+
+    document.querySelectorAll('.menu-item').forEach((button) => {
+      button.addEventListener('click', () => switchSection(button.dataset.target));
+    });
+
+    document.getElementById('select-file').onclick = async () => {
+      const filePath = await window.api.selectTxtFile();
+      selectedFilePath = filePath;
+      document.getElementById('upload-status').innerText = filePath ? `选中文件：${filePath}` : '未选择文件';
+      if (filePath) {
+        document.getElementById('book-title').value = filePath.replace(/^.*\\/, '').replace(/\.[^.]+$/, '');
+      }
+    };
+
+    document.getElementById('upload-book').onclick = async () => {
+      if (!selectedFilePath) {
+        document.getElementById('upload-status').innerText = '请先选择 TXT 文件。';
+        return;
+      }
+      const payload = {
+        filePath: selectedFilePath,
+        title: document.getElementById('book-title').value.trim(),
+        author: document.getElementById('book-author').value.trim(),
+        description: document.getElementById('book-desc').value.trim(),
+        coverImg: document.getElementById('book-cover').value.trim()
+      };
+      const result = await window.api.uploadBook(payload);
+      document.getElementById('upload-status').innerText = `上传成功：${result.title}`;
+      loadBooks();
+    };
+
+    async function loadBooks() {
+      const books = await window.api.getBooks();
+      const tbody = document.getElementById('book-list');
+      tbody.innerHTML = '';
+      books.forEach((book) => {
+        const row = document.createElement('tr');
+        row.innerHTML = `
+          <td>${book.title}</td>
+          <td>${book.author}</td>
+          <td>${book.description}</td>
+          <td>${book.size}</td>
+          <td class="actions">
+            <button onclick='parseBook(${book.id})'>解析章节</button>
+          </td>
+        `;
+        tbody.appendChild(row);
+      });
+    }
+
+    async function parseBook(bookId) {
+      const result = await window.api.parseBook({ bookId });
+      document.querySelector('.menu-item[data-target="result-section"]').click();
+      const output = document.getElementById('chapter-output');
+      output.innerHTML = `<h3>${result.book.title} 解析结果</h3>`;
+      result.chapters.slice(0, 20).forEach((chapter, index) => {
+        const block = document.createElement('div');
+        block.style.marginBottom = '16px';
+        block.innerHTML = `<strong>${index + 1}. ${chapter.title}</strong><pre>${chapter.content.slice(0, 300)}</pre>`;
+        output.appendChild(block);
+      });
+      if (result.chapters.length > 20) {
+        const more = document.createElement('div');
+        more.innerHTML = `... 共 ${result.chapters.length} 章`;
+        output.appendChild(more);
+      }
+    }
+
+    async function loadRules() {
+      const rules = await window.api.getRules();
+      document.getElementById('rule-prefix').value = rules.chapterPrefix;
+      document.getElementById('rule-suffixes').value = rules.chapterSuffixes.join(',');
+      document.getElementById('rule-max-title-length').value = rules.maxTitleLength;
+      document.getElementById('rule-empty-line').checked = !!rules.useEmptyLineAsTitle;
+    }
+
+    document.getElementById('save-rules').onclick = async () => {
+      const rules = {
+        chapterPrefix: document.getElementById('rule-prefix').value.trim() || '第',
+        chapterSuffixes: document.getElementById('rule-suffixes').value.split(',').map((item) => item.trim()).filter(Boolean),
+        maxTitleLength: Number(document.getElementById('rule-max-title-length').value) || 30,
+        ignorePatterns: ['^\\s*$'],
+        useEmptyLineAsTitle: document.getElementById('rule-empty-line').checked
+      };
+      await window.api.saveRules(rules);
+      document.getElementById('server-status').innerText = '解析规则已保存';
+    };
+
+    document.getElementById('start-server').onclick = async () => {
+      const result = await window.api.startServer();
+      lastServerUrl = result.url;
+      document.getElementById('server-status').innerText = `HTTP 服务已启动：${result.url}/html`;
+    };
+
+    document.getElementById('open-service-page').onclick = async () => {
+      if (lastServerUrl) {
+        window.api.openUrl(lastServerUrl);
+      } else {
+        const result = await window.api.startServer();
+        lastServerUrl = result.url;
+        document.getElementById('server-status').innerText = `HTTP 服务已启动：${result.url}/html`;
+      }
+    };
+
+    async function loadHtmlFiles() {
+      // HTML 文件列表不再展示
+    }
+
+    loadBooks();
+    loadRules();
+  </script>
+</body>
+</html>
