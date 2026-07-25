@@ -18,6 +18,14 @@ let serverInstance = null;
 let serverPort = 3000;
 let mainWindow;
 let database;
+const apiLogs = [];
+
+function addApiLog(entry) {
+  if (apiLogs.length >= 200) {
+    apiLogs.shift();
+  }
+  apiLogs.push(entry);
+}
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -45,6 +53,46 @@ function startStaticServer() {
   const appServer = express();
   appServer.use(express.json());
   appServer.use(express.urlencoded({ extended: true }));
+
+  appServer.use((req, res, next) => {
+    const startTime = Date.now();
+    const requestBody = req.method === 'GET' ? req.query : req.body;
+    const formatBody = (body) => {
+      if (body === undefined || body === null) {
+        return '';
+      }
+      if (typeof body === 'string') {
+        return body.length > 500 ? `${body.slice(0, 500)}...` : body;
+      }
+      try {
+        const text = JSON.stringify(body);
+        return text.length > 500 ? `${text.slice(0, 500)}...` : text;
+      } catch {
+        return String(body);
+      }
+    };
+    const originalSend = res.send.bind(res);
+    res.send = function (body) {
+      const duration = Date.now() - startTime;
+      const responsePayload = formatBody(body);
+      const statusCode = res.statusCode || 200;
+      console.log(`[API] ${req.method} ${req.originalUrl} ${statusCode} ${duration}ms response=${responsePayload}`);
+      addApiLog({
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+        timestamp: new Date().toISOString(),
+        method: req.method,
+        url: req.originalUrl,
+        statusCode,
+        duration,
+        requestBody: formatBody(requestBody),
+        responseBody: responsePayload
+      });
+      return originalSend(body);
+    };
+    const requestPayload = formatBody(requestBody);
+    console.log(`[API] request ${req.method} ${req.originalUrl} body=${requestPayload}`);
+    next();
+  });
 
   const upload = multer({ dest: path.join(appDataDir, 'temp') });
 
@@ -117,11 +165,11 @@ function startStaticServer() {
         <div class="book-meta">
           <h3><a href="/detail?id=${book.id}">${book.title}</a></h3>
           <p>大小：${book.size}</p>
-          <p>封面：${book.coverImg || '—'}</p>
+          ${book.coverImg ? `<img class="cover-img" src="${book.coverImg}" alt="封面" />` : '<p>封面：—</p>'}
         </div>
         <div class="book-actions">
-          <a class="action-link" href="#" onclick="deleteBook(${book.id});return false;">删除</a>
-          <a class="action-link" href="#" onclick="openFolder(${book.id});return false;">打开文件夹</a>
+          <button class="action-link" type="button" onclick="deleteBook(${book.id});">删除</button>
+          <button class="action-link" type="button" onclick="openFolder(${book.id});">打开文件夹</button>
         </div>
       </li>
     `).join('');
@@ -141,6 +189,7 @@ function startStaticServer() {
       .book-meta h3{margin:0 0 8px;font-size:20px;color:#0f172a;}
       .book-meta h3 a{color:inherit;text-decoration:none;}
       .book-meta p{margin:0;color:#475569;font-size:14px;line-height:1.6;}
+      .book-meta img.cover-img{display:block;margin-top:10px;max-width:140px;border-radius:14px;object-fit:cover;box-shadow:0 16px 40px rgba(15,23,42,.08);}
       .book-actions{display:flex;gap:16px;}
       .action-link{color:#2563eb;text-decoration:none;font-weight:600;}
       .action-link:hover{text-decoration:underline;}
@@ -395,6 +444,10 @@ ipcMain.handle('get-rules', async () => {
 
 ipcMain.handle('save-rules', async (_, rules) => {
   return saveRules(rulesPath, rules);
+});
+
+ipcMain.handle('get-api-logs', async () => {
+  return apiLogs.slice().reverse();
 });
 
 ipcMain.handle('start-server', async () => {

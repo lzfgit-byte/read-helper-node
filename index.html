@@ -43,6 +43,7 @@
         <li><button class="menu-item" data-target="books-section">书籍列表</button></li>
         <li><button class="menu-item" data-target="rules-section">章节规则</button></li>
         <li><button class="menu-item" data-target="html-section">HTML 服务</button></li>
+        <li><button class="menu-item" data-target="logs-section">接口日志</button></li>
         <li><button class="menu-item" data-target="result-section">解析结果</button></li>
       </ul>
     </aside>
@@ -97,6 +98,15 @@
             <div class="field"><button id="open-service-page">打开服务页面</button></div>
           </div>
           <div class="field"><div id="server-status" style="padding:10px 12px; border:1px solid #d1d5db; border-radius:8px; background:#f9fafb; color:#111827;">服务未启动</div></div>
+        </div>
+      </section>
+
+      <section id="logs-section" class="section">
+        <div class="panel">
+          <h2>接口日志</h2>
+          <div class="field"><button id="refresh-logs">刷新日志</button></div>
+          <div id="log-list"></div>
+          <div id="log-detail" style="display:none; margin-top: 16px; white-space: pre-wrap; background:#f8fafc; padding:16px; border-radius:10px; border:1px solid #d1d5db;"></div>
         </div>
       </section>
 
@@ -225,12 +235,40 @@
       }
     };
 
-    async function loadHtmlFiles() {
-      // HTML 文件列表不再展示
+    async function loadLogs() {
+      const logs = await window.api.getApiLogs();
+      const list = document.getElementById('log-list');
+      const detail = document.getElementById('log-detail');
+      list.innerHTML = '';
+      detail.style.display = 'none';
+      logs.forEach((log) => {
+        const item = document.createElement('div');
+        item.style.padding = '12px 14px';
+        item.style.borderBottom = '1px solid #e5e7eb';
+        item.style.cursor = 'pointer';
+        item.style.display = 'flex';
+        item.style.justifyContent = 'space-between';
+        item.style.alignItems = 'center';
+        item.innerHTML = `
+          <div>
+            <div style="font-weight:600;color:#111827;">${log.method} ${log.url}</div>
+            <div style="font-size:13px;color:#475569;">${log.timestamp} · ${log.duration}ms · ${log.statusCode}</div>
+          </div>
+          <div style="font-size:13px;color:#2563eb;">查看</div>
+        `;
+        item.onclick = () => {
+          detail.style.display = 'block';
+          detail.textContent = `请求：${log.method} ${log.url}\n状态码：${log.statusCode} \n耗时：${log.duration}ms\n时间：${log.timestamp}\n请求体：${log.requestBody}\n响应：${log.responseBody}`;
+        };
+        list.appendChild(item);
+      });
     }
+
+    document.getElementById('refresh-logs').onclick = loadLogs;
 
     loadBooks();
     loadRules();
+    loadLogs();
   </script>
 </body>
 </html>

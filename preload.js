@@ -9,5 +9,6 @@ contextBridge.exposeInMainWorld('api', {
   saveRules: (rules) => ipcRenderer.invoke('save-rules', rules),
   startServer: () => ipcRenderer.invoke('start-server'),
   readHtmlFiles: () => ipcRenderer.invoke('read-html-files'),
-  openUrl: (url) => ipcRenderer.invoke('open-url', url)
+  openUrl: (url) => ipcRenderer.invoke('open-url', url),
+  getApiLogs: () => ipcRenderer.invoke('get-api-logs')
 });
