@@ -4,7 +4,30 @@
   "description": "Electron reader helper for txt upload, chapter parsing, SQLite storage and HTML service",
   "main": "main.js",
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "dist": "electron-builder --win nsis"
+  },
+  "build": {
+    "appId": "com.readerhelper.app",
+    "productName": "Reader Helper",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "**/*",
+      "!node_modules/**/*.{md,MD,markdown}",
+      "!**/*.log"
+    ],
+    "win": {
+      "target": ["nsis"],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": true
+    }
   },
   "dependencies": {
     "express": "^4.18.2",
@@ -12,7 +35,8 @@
     "sql.js": "^1.14.1"
   },
   "devDependencies": {
-    "electron": "^26.2.0"
+    "electron": "^26.2.0",
+    "electron-builder": "^24.6.0"
   },
   "author": "",
   "license": "MIT"
