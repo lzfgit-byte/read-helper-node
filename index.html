@@ -141,7 +141,10 @@
       selectedFilePath = filePath;
       document.getElementById('upload-status').innerText = filePath ? `选中文件：${filePath}` : '未选择文件';
       if (filePath) {
-        document.getElementById('book-title').value = filePath.replace(/^.*\\/, '').replace(/\.[^.]+$/, '');
+        const titleInput = document.getElementById('book-title');
+        if (!titleInput.value.trim()) {
+          titleInput.value = filePath.replace(/^.*\\/, '').replace(/\.[^.]+$/, '');
+        }
       }
     };
 
@@ -222,8 +225,20 @@
     document.getElementById('start-server').onclick = async () => {
       const result = await window.api.startServer();
       lastServerUrl = result.url;
-      document.getElementById('server-status').innerText = `HTTP 服务已启动：${result.url}/html`;
+      document.getElementById('server-status').innerText = `HTTP 服务已启动：${result.url}`;
     };
+
+    async function updateServerStatus() {
+      try {
+        const result = await window.api.startServer();
+        lastServerUrl = result.url;
+        document.getElementById('server-status').innerText = `HTTP 服务已启动：${result.url}`;
+      } catch (err) {
+        document.getElementById('server-status').innerText = 'HTTP 服务启动失败';
+      }
+    }
+
+    updateServerStatus();
 
     document.getElementById('open-service-page').onclick = async () => {
       if (lastServerUrl) {
@@ -231,7 +246,7 @@
       } else {
         const result = await window.api.startServer();
         lastServerUrl = result.url;
-        document.getElementById('server-status').innerText = `HTTP 服务已启动：${result.url}/html`;
+        document.getElementById('server-status').innerText = `HTTP 服务已启动：${result.url}`;
       }
     };
 

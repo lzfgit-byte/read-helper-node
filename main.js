@@ -45,9 +45,9 @@ function createWindow() {
   });
 }
 
-function startStaticServer() {
+function startStaticServer(openBrowser = false) {
   if (serverInstance) {
-    return { url: `http://localhost:${serverPort}/html`, running: true };
+    return { url: `http://localhost:${serverPort}/`, running: true };
   }
   ensureDir(htmlDir);
   const appServer = express();
@@ -359,7 +359,9 @@ function startStaticServer() {
   appServer.get('/status', (_, res) => res.json({ running: true, htmlFolder: htmlDir }));
   serverInstance = appServer.listen(serverPort, () => {
     console.log(`HTML server started: http://localhost:${serverPort}/`);
-    shell.openExternal(`http://localhost:${serverPort}/`);
+    if (openBrowser) {
+      shell.openExternal(`http://localhost:${serverPort}/`);
+    }
   });
   serverInstance.on('error', (error) => {
     console.error('HTTP server error', error);
@@ -374,6 +376,7 @@ app.whenReady().then(async () => {
   database = await createDatabase(dbPath);
   loadRules(rulesPath).catch(() => saveRules(rulesPath, getDefaultRules()));
   createWindow();
+  startStaticServer();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
