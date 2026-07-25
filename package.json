@@ -18,15 +18,16 @@
       "!node_modules/**/*.{md,MD,markdown}",
       "!**/*.log"
     ],
+    "icon": "public/icon.png",
     "win": {
-      "target": ["nsis"],
-      "icon": "build/icon.ico"
+      "target": ["nsis"]
     },
     "nsis": {
       "oneClick": false,
       "perMachine": false,
       "allowElevation": true,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "installerHeaderIcon": "public/icon.png"
     }
   },
   "dependencies": {
