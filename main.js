@@ -5,7 +5,7 @@ const crypto = require('crypto');
 const express = require('express');
 const multer = require('multer');
 const { createDatabase } = require('./db');
-const { parseTextToChapters, loadRules, saveRules, getDefaultRules } = require('./parseRules');
+const { parseTextToChapters, normalizeDirectoryEntries, loadRules, saveRules, getDefaultRules } = require('./parseRules');
 const { ensureDir, saveBookFile, readHtmlList } = require('./fileService');
 
 const appDataDir = path.join(app.getPath('userData'), 'reader-helper');
@@ -25,6 +25,17 @@ function addApiLog(entry) {
     apiLogs.shift();
   }
   apiLogs.push(entry);
+}
+
+function splitDirectoryEntries(directoryEntries) {
+  return normalizeDirectoryEntries(directoryEntries);
+}
+
+function serializeForScript(value) {
+  return JSON.stringify(value)
+    .replace(/</g, '\\u003c')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
 }
 
 function createWindow() {
@@ -98,7 +109,7 @@ function startStaticServer(openBrowser = false) {
 
   appServer.post('/data-operate/submitForm', upload.single('file'), async (req, res) => {
     const file = req.file;
-    const { bookName, desc, authorName, coverImg } = req.body;
+    const { bookName, desc, authorName, coverImg, directoryEntries } = req.body;
     if (!file || !bookName) {
       return res.status(400).json({ message: '文件或书名不能为空' });
     }
@@ -115,6 +126,7 @@ function startStaticServer(openBrowser = false) {
       fileName: path.basename(storedPath),
       size: `${Math.round(stats.size / 1024)} KB`,
       fileType: path.extname(storedPath).replace('.', ''),
+      directoryEntries: splitDirectoryEntries(directoryEntries).join('\n'),
       createdAt: new Date().toISOString()
     };
     database.insertBook(book);
@@ -135,6 +147,28 @@ function startStaticServer(openBrowser = false) {
       fs.unlinkSync(book.storedPath);
     }
     return res.json({ message: '删除成功' });
+  });
+
+  appServer.post('/data-operate/update', async (req, res) => {
+    const { id, title, author, description, coverImg, directoryEntries } = req.body || {};
+    if (!id) {
+      return res.status(400).json({ message: 'id 不能为空' });
+    }
+    const existing = database.getBookById(Number(id));
+    if (!existing) {
+      return res.status(404).json({ message: '书籍未找到' });
+    }
+    database.updateBook({
+      id: Number(id),
+      title: title ?? existing.title,
+      author: author ?? existing.author ?? '',
+      description: description ?? existing.description ?? '',
+      coverImg: coverImg ?? existing.coverImg ?? '',
+      directoryEntries: directoryEntries === undefined
+        ? existing.directoryEntries || ''
+        : splitDirectoryEntries(directoryEntries).join('\n')
+    });
+    return res.json({ message: '更新成功' });
   });
 
   appServer.get('/open-folder', async (req, res) => {
@@ -168,6 +202,7 @@ function startStaticServer(openBrowser = false) {
           ${book.coverImg ? `<img class="cover-img" src="${book.coverImg}" alt="封面" />` : '<p>封面：—</p>'}
         </div>
         <div class="book-actions">
+          <button class="action-link" type="button" onclick="editBookById(${book.id});">编辑</button>
           <button class="action-link" type="button" onclick="deleteBook(${book.id});">删除</button>
           <button class="action-link" type="button" onclick="openFolder(${book.id});">打开文件夹</button>
         </div>
@@ -190,7 +225,7 @@ function startStaticServer(openBrowser = false) {
       .book-meta h3 a{color:inherit;text-decoration:none;}
       .book-meta p{margin:0;color:#475569;font-size:14px;line-height:1.6;}
       .book-meta img.cover-img{display:block;margin-top:10px;max-width:140px;border-radius:14px;object-fit:cover;box-shadow:0 16px 40px rgba(15,23,42,.08);}
-      .book-actions{display:flex;gap:16px;}
+      .book-actions{display:flex;gap:16px;flex-wrap:wrap;}
       .action-link{color:#2563eb;text-decoration:none;font-weight:600;}
       .action-link:hover{text-decoration:underline;}
       .message{display:none;padding:14px 18px;border-radius:16px;margin-bottom:20px;box-shadow:0 16px 30px rgba(15,23,42,.08);}
@@ -235,7 +270,8 @@ function startStaticServer(openBrowser = false) {
             <div class="field"><label>作者</label><input type="text" name="authorName" /></div>
             <div class="field"><label>描述</label><textarea name="desc"></textarea></div>
             <div class="field"><label>封面</label><input type="text" name="coverImg" placeholder="封面 URL，可选" /></div>
-            <div class="hint">提交后书籍会保存至本地目录，删除操作会从数据库中移除记录。</div>
+            <div class="field"><label>目录项</label><textarea name="directoryEntries" rows="5" placeholder="每行一条，换行分隔"></textarea></div>
+            <div class="hint">提交后书籍会保存至本地目录，目录内容会按行 trim 后用于匹配。</div>
           </div>
           <div class="modal-footer">
             <button type="button" class="btn btn-secondary" onclick="hideModal()">取消</button>
@@ -244,9 +280,78 @@ function startStaticServer(openBrowser = false) {
         </form>
       </div>
     </div>
+    <div id="editModal" class="modal">
+      <div class="modal-panel">
+        <div class="modal-header">
+          <h2>编辑书籍</h2>
+          <button class="close-btn" onclick="hideEditModal()">×</button>
+        </div>
+        <div class="modal-body">
+          <input id="editBookId" type="hidden" />
+          <div class="field"><label>书名</label><input id="editBookTitle" type="text" /></div>
+          <div class="field"><label>作者</label><input id="editBookAuthor" type="text" /></div>
+          <div class="field"><label>描述</label><textarea id="editBookDescription"></textarea></div>
+          <div class="field"><label>封面</label><input id="editBookCover" type="text" /></div>
+          <div class="field"><label>目录项</label><textarea id="editBookDirectory" rows="5" placeholder="每行一条"></textarea></div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" onclick="hideEditModal()">取消</button>
+          <button type="button" class="btn btn-primary" onclick="saveEditBook()">保存</button>
+        </div>
+      </div>
+    </div>
     <script>
+      let editingBook = null;
+      const initialBooks = ${serializeForScript(books)};
+      const booksById = new Map(initialBooks.map((book) => [String(book.id), book]));
       function showModal(){document.getElementById('bookModal').classList.add('active');}
       function hideModal(){document.getElementById('bookModal').classList.remove('active');}
+      function showEditModal(book){
+        editingBook = book;
+        document.getElementById('editBookId').value = book.id;
+        document.getElementById('editBookTitle').value = book.title || '';
+        document.getElementById('editBookAuthor').value = book.author || '';
+        document.getElementById('editBookDescription').value = book.description || '';
+        document.getElementById('editBookCover').value = book.coverImg || '';
+        document.getElementById('editBookDirectory').value = book.directoryEntries || '';
+        document.getElementById('editModal').classList.add('active');
+      }
+      function hideEditModal(){document.getElementById('editModal').classList.remove('active'); editingBook = null;}
+      function editBookById(bookId){
+        const book = booksById.get(String(bookId));
+        if (!book) {
+          showMessage('找不到书籍信息', 'error');
+          return;
+        }
+        showEditModal(book);
+      }
+      async function saveEditBook(){
+        if (!editingBook) return;
+        const body = {
+          id: Number(document.getElementById('editBookId').value),
+          title: document.getElementById('editBookTitle').value,
+          author: document.getElementById('editBookAuthor').value,
+          description: document.getElementById('editBookDescription').value,
+          coverImg: document.getElementById('editBookCover').value,
+          directoryEntries: document.getElementById('editBookDirectory').value
+        };
+        try {
+          const response = await fetch('/data-operate/update', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+          });
+          if (!response.ok) {
+            const text = await response.text();
+            throw new Error(text || '保存失败');
+          }
+          hideEditModal();
+          showMessage('保存成功');
+          setTimeout(()=>location.reload(), 400);
+        } catch (error) {
+          showMessage(error.message || '保存失败', 'error');
+        }
+      }
       function showMessage(text,type='info'){
         const msg=document.getElementById('message');
         msg.textContent=text;
@@ -315,7 +420,11 @@ function startStaticServer(openBrowser = false) {
     if (!book) {
       return res.status(404).send('书籍未找到');
     }
-    const chapters = parseTextToChapters(fs.readFileSync(book.storedPath, 'utf8'), await loadRules(rulesPath));
+    const chapters = parseTextToChapters(
+      fs.readFileSync(book.storedPath, 'utf8'),
+      await loadRules(rulesPath),
+      splitDirectoryEntries(book.directoryEntries)
+    );
     const items = chapters.map((chapter, index) => `<li><a href="/content?id=${encodeURIComponent(crypto.createHash('md5').update(book.id + '-' + index).digest('hex'))}&bookId=${book.id}">${chapter.title}</a></li>`).join('');
     const html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"/><title>目录页面</title><style>
       body{margin:0;font-family:'Segoe UI','Helvetica Neue',Arial,sans-serif;background:#f4f7fb;color:#0f172a;}
@@ -341,7 +450,11 @@ function startStaticServer(openBrowser = false) {
     if (!book) {
       return res.status(404).send('书籍未找到');
     }
-    const chapters = parseTextToChapters(fs.readFileSync(book.storedPath, 'utf8'), await loadRules(rulesPath));
+    const chapters = parseTextToChapters(
+      fs.readFileSync(book.storedPath, 'utf8'),
+      await loadRules(rulesPath),
+      splitDirectoryEntries(book.directoryEntries)
+    );
     let chapterContent = '';
     chapters.forEach((chapter, index) => {
       const chunkId = crypto.createHash('md5').update(book.id + '-' + index).digest('hex');
@@ -405,7 +518,7 @@ ipcMain.handle('select-txt-file', async () => {
 });
 
 ipcMain.handle('upload-book', async (_, payload) => {
-  const { filePath, title, author, description, coverImg } = payload;
+  const { filePath, title, author, description, coverImg, directoryEntries } = payload;
   if (!filePath || !fs.existsSync(filePath)) {
     throw new Error('未找到上传文件');
   }
@@ -421,6 +534,7 @@ ipcMain.handle('upload-book', async (_, payload) => {
     fileName: path.basename(storedPath),
     size: `${Math.round(stats.size / 1024)} KB`,
     fileType: path.extname(storedPath).replace('.', ''),
+    directoryEntries: splitDirectoryEntries(directoryEntries).join('\n'),
     createdAt: new Date().toISOString()
   };
   return database.insertBook(book);
@@ -430,6 +544,24 @@ ipcMain.handle('get-books', async () => {
   return database.listBooks();
 });
 
+ipcMain.handle('update-book', async (_, payload) => {
+  const { id, title, author, description, coverImg, directoryEntries } = payload;
+  const existing = database.getBookById(id);
+  if (!existing) {
+    throw new Error('找不到书籍信息');
+  }
+  return database.updateBook({
+    id,
+    title: title ?? existing.title,
+    author: author ?? existing.author ?? '',
+    description: description ?? existing.description ?? '',
+    coverImg: coverImg ?? existing.coverImg ?? '',
+    directoryEntries: directoryEntries === undefined
+      ? existing.directoryEntries || ''
+      : splitDirectoryEntries(directoryEntries).join('\n')
+  });
+});
+
 ipcMain.handle('parse-book', async (_, { bookId }) => {
   const book = database.getBookById(bookId);
   if (!book) {
@@ -437,7 +569,8 @@ ipcMain.handle('parse-book', async (_, { bookId }) => {
   }
   const fileContent = fs.readFileSync(book.storedPath, 'utf8');
   const rules = await loadRules(rulesPath);
-  const chapters = parseTextToChapters(fileContent, rules);
+  const directoryEntries = splitDirectoryEntries(book.directoryEntries);
+  const chapters = parseTextToChapters(fileContent, rules, directoryEntries);
   return { book, chapters };
 });
 

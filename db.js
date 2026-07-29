@@ -25,6 +25,7 @@ async function createDatabase(dbPath) {
       file_name TEXT,
       size TEXT,
       file_type TEXT,
+      directory_entries TEXT,
       created_at TEXT
     );
   `);
@@ -32,6 +33,49 @@ async function createDatabase(dbPath) {
   function saveDb() {
     const data = db.export();
     fs.writeFileSync(dbPath, Buffer.from(data));
+  }
+
+  function getTableColumns(tableName) {
+    const stmt = db.prepare(`PRAGMA table_info(${tableName})`);
+    const columns = new Set();
+    while (stmt.step()) {
+      const row = stmt.getAsObject();
+      if (row && row.name) {
+        columns.add(row.name);
+      }
+    }
+    stmt.free();
+    return columns;
+  }
+
+  function ensureBookColumns() {
+    const columns = getTableColumns('books');
+    let migrated = false;
+    const requiredColumns = [
+      ['title', 'TEXT'],
+      ['author', 'TEXT'],
+      ['description', 'TEXT'],
+      ['cover_img', 'TEXT'],
+      ['source_path', 'TEXT'],
+      ['stored_path', 'TEXT'],
+      ['file_name', 'TEXT'],
+      ['size', 'TEXT'],
+      ['file_type', 'TEXT'],
+      ['directory_entries', 'TEXT'],
+      ['created_at', 'TEXT']
+    ];
+
+    for (const [columnName, columnType] of requiredColumns) {
+      if (!columns.has(columnName)) {
+        db.run(`ALTER TABLE books ADD COLUMN ${columnName} ${columnType}`);
+        columns.add(columnName);
+        migrated = true;
+      }
+    }
+    return migrated;
+  }
+  if (ensureBookColumns()) {
+    saveDb();
   }
 
   function normalizeRow(row) {
@@ -43,13 +87,14 @@ async function createDatabase(dbPath) {
       title: row.title,
       author: row.author,
       description: row.description,
-      coverImg: row.cover_img || row.coverImg,
-      sourcePath: row.source_path || row.sourcePath,
-      storedPath: row.stored_path || row.storedPath,
-      fileName: row.file_name || row.fileName,
+      coverImg: row.cover_img ?? row.coverImg ?? '',
+      sourcePath: row.source_path ?? row.sourcePath ?? '',
+      storedPath: row.stored_path ?? row.storedPath ?? '',
+      fileName: row.file_name ?? row.fileName ?? '',
       size: row.size,
-      fileType: row.file_type || row.fileType,
-      createdAt: row.created_at || row.createdAt
+      fileType: row.file_type ?? row.fileType ?? '',
+      directoryEntries: row.directory_entries ?? row.directoryEntries ?? '',
+      createdAt: row.created_at ?? row.createdAt
     };
   }
 
@@ -81,26 +126,49 @@ async function createDatabase(dbPath) {
         INSERT INTO books (
           title, author, description, cover_img,
           source_path, stored_path, file_name, size,
-          file_type, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          file_type, directory_entries, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       stmt.run([
-        book.title,
-        book.author,
-        book.description,
-        book.coverImg,
-        book.sourcePath,
-        book.storedPath,
-        book.fileName,
-        book.size,
-        book.fileType,
-        book.createdAt
+        book.title ?? '',
+        book.author ?? '',
+        book.description ?? '',
+        book.coverImg ?? '',
+        book.sourcePath ?? '',
+        book.storedPath ?? '',
+        book.fileName ?? '',
+        book.size ?? '',
+        book.fileType ?? '',
+        book.directoryEntries ?? '',
+        book.createdAt ?? ''
       ]);
       stmt.free();
       const result = db.exec('SELECT last_insert_rowid() AS id');
       saveDb();
       const id = result[0].values[0][0];
       return { id, ...book };
+    },
+    updateBook: (book) => {
+      const stmt = db.prepare(`
+        UPDATE books SET
+          title = ?,
+          author = ?,
+          description = ?,
+          cover_img = ?,
+          directory_entries = ?
+        WHERE id = ?
+      `);
+      stmt.run([
+        book.title ?? '',
+        book.author ?? '',
+        book.description ?? '',
+        book.coverImg ?? '',
+        book.directoryEntries ?? '',
+        book.id
+      ]);
+      stmt.free();
+      saveDb();
+      return { ...book };
     }
   };
 }

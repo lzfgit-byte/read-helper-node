@@ -59,6 +59,8 @@
           </div>
           <div class="field"><textarea id="book-desc" rows="3" placeholder="简介"></textarea></div>
           <div class="field"><input id="book-cover" placeholder="封面 URL（可选）" /></div>
+          <div class="field"><textarea id="book-directory-entries" rows="5" placeholder="目录项（每行一条，换行分隔）"></textarea></div>
+          <div class="help-text">输入目录名称，每行一条。解析时只要正文中出现这些内容，就会被识别为目录。</div>
           <div class="field"><button id="upload-book">上传并保存</button></div>
           <div class="field"><span id="upload-status"></span></div>
         </div>
@@ -75,6 +77,22 @@
           </table>
         </div>
       </section>
+
+      <div id="edit-modal" style="display:none; position:fixed; inset:0; background:rgba(15,23,42,.55); z-index:1000; align-items:center; justify-content:center;">
+        <div style="width:min(640px, 92vw); background:#fff; border-radius:16px; padding:24px; box-shadow:0 20px 60px rgba(15,23,42,.2);">
+          <h3 style="margin-top:0;">编辑书籍</h3>
+          <input id="edit-book-id" type="hidden" />
+          <div class="field"><input id="edit-book-title" placeholder="书名" /></div>
+          <div class="field"><input id="edit-book-author" placeholder="作者" /></div>
+          <div class="field"><textarea id="edit-book-description" rows="4" placeholder="简介"></textarea></div>
+          <div class="field"><input id="edit-book-cover" placeholder="封面 URL（可选）" /></div>
+          <div class="field"><textarea id="edit-book-directory" rows="5" placeholder="目录项（每行一条）"></textarea></div>
+          <div style="display:flex; justify-content:flex-end; gap:12px;">
+            <button id="cancel-edit" type="button" style="background:#e5e7eb; color:#111827;">取消</button>
+            <button id="save-edit" type="button">保存</button>
+          </div>
+        </div>
+      </div>
 
       <section id="rules-section" class="section">
         <div class="panel">
@@ -122,6 +140,7 @@
   <script>
     let selectedFilePath = null;
     let lastServerUrl = null;
+    const booksById = new Map();
 
     function switchSection(targetId) {
       document.querySelectorAll('.section').forEach((section) => {
@@ -158,7 +177,8 @@
         title: document.getElementById('book-title').value.trim(),
         author: document.getElementById('book-author').value.trim(),
         description: document.getElementById('book-desc').value.trim(),
-        coverImg: document.getElementById('book-cover').value.trim()
+        coverImg: document.getElementById('book-cover').value.trim(),
+        directoryEntries: document.getElementById('book-directory-entries').value
       };
       const result = await window.api.uploadBook(payload);
       document.getElementById('upload-status').innerText = `上传成功：${result.title}`;
@@ -169,8 +189,11 @@
       const books = await window.api.getBooks();
       const tbody = document.getElementById('book-list');
       tbody.innerHTML = '';
+      booksById.clear();
       books.forEach((book) => {
+        booksById.set(String(book.id), book);
         const row = document.createElement('tr');
+        const directoryValue = (book.directoryEntries || '').replace(/\n/g, '\\n');
         row.innerHTML = `
           <td>${book.title}</td>
           <td>${book.author}</td>
@@ -178,10 +201,54 @@
           <td>${book.size}</td>
           <td class="actions">
             <button onclick='parseBook(${book.id})'>解析章节</button>
+            <button onclick='editBookById(${book.id})'>编辑</button>
           </td>
         `;
         tbody.appendChild(row);
       });
+    }
+
+    let editingBook = null;
+
+    function showEditModal(book) {
+      editingBook = book;
+      document.getElementById('edit-book-id').value = book.id;
+      document.getElementById('edit-book-title').value = book.title || '';
+      document.getElementById('edit-book-author').value = book.author || '';
+      document.getElementById('edit-book-description').value = book.description || '';
+      document.getElementById('edit-book-cover').value = book.coverImg || '';
+      document.getElementById('edit-book-directory').value = book.directoryEntries || '';
+      document.getElementById('edit-modal').style.display = 'block';
+    }
+
+    function hideEditModal() {
+      document.getElementById('edit-modal').style.display = 'none';
+      editingBook = null;
+    }
+
+    document.getElementById('cancel-edit').onclick = hideEditModal;
+    document.getElementById('save-edit').onclick = async () => {
+      if (!editingBook) {
+        return;
+      }
+      await window.api.updateBook({
+        id: editingBook.id,
+        title: document.getElementById('edit-book-title').value.trim(),
+        author: document.getElementById('edit-book-author').value.trim(),
+        description: document.getElementById('edit-book-description').value.trim(),
+        coverImg: document.getElementById('edit-book-cover').value.trim(),
+        directoryEntries: document.getElementById('edit-book-directory').value
+      });
+      hideEditModal();
+      loadBooks();
+    };
+
+    async function editBookById(bookId) {
+      const book = booksById.get(String(bookId));
+      if (!book) {
+        return;
+      }
+      showEditModal(book);
     }
 
     async function parseBook(bookId) {

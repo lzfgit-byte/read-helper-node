@@ -106,21 +106,6 @@ function buildChapterTitle(title, content, chapters) {
       finalTitle = `第${chapters.length + 1}章[自动]`;
     }
   }
-
-  if (finalTitle.endsWith('节') || finalTitle.endsWith('章') || finalTitle.endsWith('回')) {
-    const lines = content.split('\n');
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed) {
-        continue;
-      }
-      if (trimmed.length > 1 && trimmed.length < 25) {
-        finalTitle = `${finalTitle} ${trimmed.replace('<br/>', '')}`;
-      }
-      break;
-    }
-  }
-
   return finalTitle;
 }
 
@@ -139,27 +124,36 @@ function flushChapter(chapters, title, content) {
   });
 }
 
-function parseTextToChapters(text, rules) {
+function normalizeDirectoryEntries(directoryEntries) {
+  const entries = Array.isArray(directoryEntries)
+    ? directoryEntries
+    : String(directoryEntries ?? '').split(/\r?\n/);
+  return entries.map((entry) => String(entry).trim()).filter(Boolean);
+}
+
+function parseTextToChapters(text, rules, directoryEntries = []) {
   const lines = text.split(/\r?\n/);
   const chapters = [];
   let title = '';
   let content = '';
   const enableEmptyLineTitle = !!rules.useEmptyLineAsTitle;
+  const normalizedDirectoryEntries = new Set(normalizeDirectoryEntries(directoryEntries));
 
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim();
+    const rawLine = lines[i];
+    const line = rawLine.trim();
     if (!line || isSeqContent(line)) {
       continue;
     }
-    const isTitle = isIsTitle(line, rules);
+
+    const isDirectoryEntry = normalizedDirectoryEntries.has(line);
+    const isTitle = isDirectoryEntry || isIsTitle(line, rules);
     const isEmptyLineTitle = enableEmptyLineTitle && isMaybeTitle(line, i, lines, rules);
     if (isTitle || isEmptyLineTitle) {
       if (content) {
         flushChapter(chapters, title, content);
-        title = '';
       } else if (title) {
         flushChapter(chapters, title, title);
-        title = '';
       }
       title = line;
       content = '';
@@ -174,4 +168,4 @@ function parseTextToChapters(text, rules) {
   return chapters;
 }
 
-module.exports = { getDefaultRules, loadRules, saveRules, parseTextToChapters };
+module.exports = { getDefaultRules, loadRules, saveRules, parseTextToChapters, normalizeDirectoryEntries };
