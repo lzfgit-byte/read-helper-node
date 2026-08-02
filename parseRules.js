@@ -137,7 +137,7 @@ function parseTextToChapters(text, rules, directoryEntries = []) {
   let title = '';
   let content = '';
   const enableEmptyLineTitle = !!rules.useEmptyLineAsTitle;
-  const normalizedDirectoryEntries = new Set(normalizeDirectoryEntries(directoryEntries));
+  const normalizedDirectoryEntries = normalizeDirectoryEntries(directoryEntries);
 
   for (let i = 0; i < lines.length; i++) {
     const rawLine = lines[i];
@@ -146,7 +146,7 @@ function parseTextToChapters(text, rules, directoryEntries = []) {
       continue;
     }
 
-    const isDirectoryEntry = normalizedDirectoryEntries.has(line);
+    const isDirectoryEntry = normalizedDirectoryEntries.some(item => item.includes(line));
     const isTitle = isDirectoryEntry || isIsTitle(line, rules);
     const isEmptyLineTitle = enableEmptyLineTitle && isMaybeTitle(line, i, lines, rules);
     if (isTitle || isEmptyLineTitle) {
