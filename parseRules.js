@@ -7,7 +7,8 @@ function getDefaultRules() {
     minTitleLength: 2,
     maxTitleLength: 20,
     ignorePatterns: ['^\\s*$'],
-    useEmptyLineAsTitle: false
+    useEmptyLineAsTitle: false,
+    titleStarts: ['序章']
   };
 }
 
@@ -45,7 +46,7 @@ function canAppend(line, idx, lines, rules) {
   if (idx > 1) {
     const prev = lines[idx - 1];
     const next = lines[idx + 1];
-    if (line.length < 20 && prev.trim() === '' && next.trim() === '') {
+    if (line.length < 20 && prev?.trim() === '' && next?.trim() === '') {
       return line + '  ';
     }
   }
@@ -55,11 +56,22 @@ function canAppend(line, idx, lines, rules) {
 function isIsTitle(line, rules) {
   const prefix = (rules.chapterPrefix || '').trim();
   const startsWith = prefix ? [prefix] : [];
+  const extraStarts = Array.isArray(rules.titleStarts) ? rules.titleStarts : [];
+  const starts = startsWith.concat(extraStarts);
   const endsWith = Array.isArray(rules.chapterSuffixes) ? rules.chapterSuffixes : [];
   const containsStr = endsWith.concat(['创作手记', '后记', '楔子']);
-  const isTitleContent = (line === '序' || startsWith.some((item) => item && line.startsWith(item)) || endsWith.some((item) => item && line.endsWith(item)))
-    && (containsStr.some((item) => item && line.includes(item)) || (line.includes('卷') && line.indexOf('卷') < 5) || (line.includes('序') && line.length < 15));
+  const startsMatch = starts.some((item) => item && line.startsWith(item));
+  const endsMatch = endsWith.some((item) => item && line.endsWith(item));
+  const containsMatch = containsStr.some((item) => item && line.includes(item));
+  const shortSeq = (line.includes('卷') && line.indexOf('卷') < 5) || (line.includes('序') && line.length < 15);
+  // If the line starts with a configured start (like '序章'), accept it as a title even
+  // if it doesn't strictly end with a chapter suffix. Otherwise require contains/short checks.
+  const isTitleContent = (line === '序' || startsMatch || endsMatch) && (startsMatch || containsMatch || shortSeq);
   const validLength = line.length >= (rules.minTitleLength || 1) && line.length < rules.maxTitleLength;
+  // Accept literal '序章...' lines as titles even if `rules.titleStarts` isn't provided
+  if (!isTitleContent && line.startsWith('序章')) {
+    return validLength || line === '序';
+  }
   return isTitleContent && (validLength || line === '序');
 }
 
@@ -132,7 +144,7 @@ function normalizeDirectoryEntries(directoryEntries) {
 }
 
 function parseTextToChapters(text, rules, directoryEntries = []) {
-  const lines = text.split(/\r?\n/);
+  const lines = (text == null ? '' : String(text)).split(/\r?\n/);
   const chapters = [];
   let title = '';
   let content = '';
