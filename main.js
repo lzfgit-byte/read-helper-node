@@ -604,6 +604,22 @@ ipcMain.handle('update-book', async (_, payload) => {
   });
 });
 
+ipcMain.handle('open-book-folder', async (_, bookId) => {
+  const book = database.getBookById(bookId);
+  if (!book) {
+    throw new Error('找不到书籍信息');
+  }
+  if (!book.storedPath || !fs.existsSync(book.storedPath)) {
+    throw new Error('书籍文件不存在');
+  }
+  const folder = path.dirname(book.storedPath);
+  const errorMessage = await shell.openPath(folder);
+  if (errorMessage) {
+    throw new Error(`打开文件夹失败：${errorMessage}`);
+  }
+  return folder;
+});
+
 ipcMain.handle('parse-book', async (_, { bookId }) => {
   const book = database.getBookById(bookId);
   if (!book) {

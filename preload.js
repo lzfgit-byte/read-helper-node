@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld('api', {
   uploadBook: (payload) => ipcRenderer.invoke('upload-book', payload),
   getBooks: () => ipcRenderer.invoke('get-books'),
   parseBook: (payload) => ipcRenderer.invoke('parse-book', payload),
+  openBookFolder: (bookId) => ipcRenderer.invoke('open-book-folder', bookId),
   getRules: () => ipcRenderer.invoke('get-rules'),
   saveRules: (rules) => ipcRenderer.invoke('save-rules', rules),
   startServer: () => ipcRenderer.invoke('start-server'),
