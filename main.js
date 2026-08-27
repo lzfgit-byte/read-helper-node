@@ -18,14 +18,6 @@ let serverInstance = null;
 let serverPort = 3000;
 let mainWindow;
 let database;
-const apiLogs = [];
-
-function addApiLog(entry) {
-  if (apiLogs.length >= 200) {
-    apiLogs.shift();
-  }
-  apiLogs.push(entry);
-}
 
 function splitDirectoryEntries(directoryEntries) {
   return normalizeDirectoryEntries(directoryEntries);
@@ -152,46 +144,6 @@ function startStaticServer(openBrowser = false) {
     } finally {
       clearTimeout(timeoutTimer);
     }
-  });
-
-  appServer.use((req, res, next) => {
-    const startTime = Date.now();
-    const requestBody = req.method === 'GET' ? req.query : req.body;
-    const formatBody = (body) => {
-      if (body === undefined || body === null) {
-        return '';
-      }
-      if (typeof body === 'string') {
-        return body.length > 500 ? `${body.slice(0, 500)}...` : body;
-      }
-      try {
-        const text = JSON.stringify(body);
-        return text.length > 500 ? `${text.slice(0, 500)}...` : text;
-      } catch {
-        return String(body);
-      }
-    };
-    const originalSend = res.send.bind(res);
-    res.send = function (body) {
-      const duration = Date.now() - startTime;
-      const responsePayload = formatBody(body);
-      const statusCode = res.statusCode || 200;
-      console.log(`[API] ${req.method} ${req.originalUrl} ${statusCode} ${duration}ms response=${responsePayload}`);
-      addApiLog({
-        id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
-        timestamp: new Date().toISOString(),
-        method: req.method,
-        url: req.originalUrl,
-        statusCode,
-        duration,
-        requestBody: formatBody(requestBody),
-        responseBody: responsePayload
-      });
-      return originalSend(body);
-    };
-    const requestPayload = formatBody(requestBody);
-    console.log(`[API] request ${req.method} ${req.originalUrl} body=${requestPayload}`);
-    next();
   });
 
   const upload = multer({ dest: path.join(appDataDir, 'temp') });
@@ -670,10 +622,6 @@ ipcMain.handle('get-rules', async () => {
 
 ipcMain.handle('save-rules', async (_, rules) => {
   return saveRules(rulesPath, rules);
-});
-
-ipcMain.handle('get-api-logs', async () => {
-  return apiLogs.slice().reverse();
 });
 
 ipcMain.handle('start-server', async () => {

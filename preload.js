@@ -10,6 +10,5 @@ contextBridge.exposeInMainWorld('api', {
   startServer: () => ipcRenderer.invoke('start-server'),
   readHtmlFiles: () => ipcRenderer.invoke('read-html-files'),
   openUrl: (url) => ipcRenderer.invoke('open-url', url),
-  getApiLogs: () => ipcRenderer.invoke('get-api-logs'),
   updateBook: (payload) => ipcRenderer.invoke('update-book', payload)
 });
