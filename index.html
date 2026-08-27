@@ -59,6 +59,19 @@
     .btn-secondary { background: #e5e7eb; color: #111827; }
     .btn-secondary:hover { background: #d1d5db; }
     .field-label { display: block; margin-bottom: 6px; font-size: 13px; font-weight: 600; color: #374151; }
+    .field .help-text { margin-bottom: 0; }
+    input[type="checkbox"] { width: auto; padding: 0; cursor: pointer; }
+    .rule-group { border: 1px solid #e5e7eb; border-radius: 12px; padding: 16px; margin-bottom: 16px; background: #f8fafc; }
+    .rule-group-title { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 700; color: #374151; margin-bottom: 12px; }
+    .rule-group-title::before { content: ''; width: 4px; height: 14px; border-radius: 2px; background: #2563eb; }
+    .rule-group .field { margin-bottom: 14px; }
+    .rule-group .field:last-child { margin-bottom: 0; }
+    .rule-check { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border: 1px solid #e5e7eb; border-radius: 10px; background: #fff; margin-bottom: 10px; }
+    .rule-check:last-child { margin-bottom: 0; }
+    .rule-check input[type="checkbox"] { width: 16px; height: 16px; margin-top: 3px; flex: 0 0 auto; }
+    .check-text { cursor: pointer; }
+    .check-text strong { display: block; font-size: 14px; color: #111827; }
+    .check-text small { display: block; font-size: 12px; color: #6b7280; margin-top: 2px; line-height: 1.5; }
     .cover-edit { display: flex; gap: 12px; align-items: flex-start; }
     .cover-edit input { flex: 1; }
     .cover-preview { flex: 0 0 56px; width: 56px; height: 76px; border-radius: 8px; background: #f1f5f9; border: 1px solid #e5e7eb; overflow: hidden; display: flex; align-items: center; justify-content: center; color: #94a3b8; font-size: 20px; }
@@ -162,15 +175,82 @@
       <section id="rules-section" class="section">
         <div class="panel">
           <h2>解析规则</h2>
-          <div class="field"><input id="rule-prefix" placeholder="章节前缀，例如：第" /></div>
-          <div class="help-text">仅在标题检测中使用该前缀，例如“第”。</div>
-          <div class="field"><input id="rule-keywords" placeholder="前缀后需包含的关键字，例如：章,回,节" /></div>
-          <div class="help-text">以“第”开头的行还需包含这些关键字才会被识别为标题，多个关键字用逗号分隔。</div>
-          <div class="field"><input id="rule-suffixes" placeholder="章节后缀，例如：章,回,节" /></div>
-          <div class="help-text">多个后缀用逗号分隔，标题以这些后缀结尾时会被识别。</div>
-          <div class="field"><input id="rule-max-title-length" placeholder="章节最大长度" type="number" /></div>
-          <div class="help-text">超过该长度则不会判断为章节标题。</div>
-          <div class="field"><label><input id="rule-empty-line" type="checkbox" /> 启用空行判断</label></div>
+          <div class="help-text" style="margin-bottom:16px;">配置章节标题的识别规则，保存后对之后的解析生效。</div>
+
+          <div class="rule-group">
+            <div class="rule-group-title">章节识别</div>
+            <div class="grid-2">
+              <div class="field">
+                <label class="field-label" for="rule-prefix">章节前缀</label>
+                <input id="rule-prefix" placeholder="例如：第" />
+                <div class="help-text">行以该前缀开头才可能被识别为标题。</div>
+              </div>
+              <div class="field">
+                <label class="field-label" for="rule-keywords">前缀后需包含的关键字</label>
+                <input id="rule-keywords" placeholder="例如：章,回,节" />
+                <div class="help-text">以“第”开头的行还需包含其中之一，逗号分隔。</div>
+              </div>
+              <div class="field">
+                <label class="field-label" for="rule-suffixes">章节后缀</label>
+                <input id="rule-suffixes" placeholder="例如：章,回,节" />
+                <div class="help-text">以这些后缀结尾的行会被识别为标题，逗号分隔。</div>
+              </div>
+              <div class="field">
+                <label class="field-label" for="rule-title-starts">特殊标题开头</label>
+                <input id="rule-title-starts" placeholder="例如：序章,楔子,番外" />
+                <div class="help-text">以这些词开头的行直接视为标题，逗号分隔。</div>
+              </div>
+              <div class="field">
+                <label class="field-label" for="rule-title-contains">标题辅助词</label>
+                <input id="rule-title-contains" placeholder="例如：创作手记,后记" />
+                <div class="help-text">包含这些词的短行更倾向被识别为标题。</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="rule-group">
+            <div class="rule-group-title">标题长度（字符数）</div>
+            <div class="grid-2">
+              <div class="field">
+                <label class="field-label" for="rule-min-title-length">最短标题长度</label>
+                <input id="rule-min-title-length" type="number" min="1" placeholder="默认 2" />
+                <div class="help-text">行文本少于该字符数时不会判定为章节标题，用于排除过短的行。</div>
+              </div>
+              <div class="field">
+                <label class="field-label" for="rule-max-title-length">最长标题长度</label>
+                <input id="rule-max-title-length" type="number" min="2" placeholder="默认 20" />
+                <div class="help-text">行文本达到该字符数后不再判定为标题，避免长正文被误判。</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="rule-group">
+            <div class="rule-group-title">行过滤</div>
+            <div class="field">
+              <label class="field-label" for="rule-ignore-patterns">忽略行（正则表达式）</label>
+              <textarea id="rule-ignore-patterns" rows="2" placeholder="每行一个正则，例如：^本书由.+提供$"></textarea>
+              <div class="help-text">匹配这些正则的行会被直接跳过，常用于过滤广告、站点水印。</div>
+            </div>
+          </div>
+
+          <div class="rule-group">
+            <div class="rule-group-title">识别模式</div>
+            <div class="rule-check">
+              <input id="rule-strict" type="checkbox" />
+              <label class="check-text" for="rule-strict">
+                <strong>严格数字模式</strong>
+                <small>开启后“第”需紧跟数字或中文数字再接关键字（如“第12章”），可避免“第二天章鱼出现了”被误判。</small>
+              </label>
+            </div>
+            <div class="rule-check">
+              <input id="rule-empty-line" type="checkbox" />
+              <label class="check-text" for="rule-empty-line">
+                <strong>空行判断模式</strong>
+                <small>开启后，前后各有连续两个空行包围的短行也会被视为章节标题。</small>
+              </label>
+            </div>
+          </div>
+
           <div class="field"><button id="save-rules">保存解析规则</button></div>
         </div>
       </section>
@@ -506,20 +586,30 @@
     async function loadRules() {
       const rules = await window.api.getRules();
       document.getElementById('rule-prefix').value = rules.chapterPrefix;
-      document.getElementById('rule-keywords').value = (rules.chapterKeywords || ['章', '回', '节']).join(',');
-      document.getElementById('rule-suffixes').value = rules.chapterSuffixes.join(',');
+      document.getElementById('rule-keywords').value = (rules.chapterKeywords || []).join(',');
+      document.getElementById('rule-suffixes').value = (rules.chapterSuffixes || []).join(',');
+      document.getElementById('rule-title-starts').value = (rules.titleStarts || []).join(',');
+      document.getElementById('rule-title-contains').value = (rules.titleContains || []).join(',');
+      document.getElementById('rule-min-title-length').value = rules.minTitleLength;
       document.getElementById('rule-max-title-length').value = rules.maxTitleLength;
+      document.getElementById('rule-ignore-patterns').value = (rules.ignorePatterns || []).filter((item) => item !== '^\\s*$').join('\n');
+      document.getElementById('rule-strict').checked = rules.strictNumberMode !== false;
       document.getElementById('rule-empty-line').checked = !!rules.useEmptyLineAsTitle;
     }
 
     document.getElementById('save-rules').onclick = async () => {
       const current = await window.api.getRules().catch(() => ({}));
+      const splitList = (value) => value.split(/[,，]/).map((item) => item.trim()).filter(Boolean);
       const rules = Object.assign({}, current, {
         chapterPrefix: document.getElementById('rule-prefix').value.trim() || '第',
-        chapterKeywords: document.getElementById('rule-keywords').value.split(',').map((item) => item.trim()).filter(Boolean),
-        chapterSuffixes: document.getElementById('rule-suffixes').value.split(',').map((item) => item.trim()).filter(Boolean),
-        maxTitleLength: Number(document.getElementById('rule-max-title-length').value) || 30,
-        ignorePatterns: ['^\\s*$'],
+        chapterKeywords: splitList(document.getElementById('rule-keywords').value),
+        chapterSuffixes: splitList(document.getElementById('rule-suffixes').value),
+        titleStarts: splitList(document.getElementById('rule-title-starts').value),
+        titleContains: splitList(document.getElementById('rule-title-contains').value),
+        minTitleLength: Number(document.getElementById('rule-min-title-length').value) || 2,
+        maxTitleLength: Number(document.getElementById('rule-max-title-length').value) || 20,
+        ignorePatterns: document.getElementById('rule-ignore-patterns').value.split('\n').map((item) => item.trim()).filter(Boolean),
+        strictNumberMode: document.getElementById('rule-strict').checked,
         useEmptyLineAsTitle: document.getElementById('rule-empty-line').checked
       });
       await window.api.saveRules(rules);
