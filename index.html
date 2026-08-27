@@ -6,15 +6,20 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Reader Helper</title>
   <style>
-    body { margin: 0; font-family: sans-serif; background: #f4f4f4; }
-    .layout { display: grid; grid-template-columns: 240px 1fr; min-height: 100vh; }
-    .sidebar { background: #1f2937; color: #fff; padding: 24px 16px; }
+    html, body { height: 100%; }
+    body { margin: 0; font-family: sans-serif; background: #f4f4f4; overflow: hidden; }
+    .layout { display: grid; grid-template-columns: 240px 1fr; height: 100vh; }
+    .sidebar { background: #1f2937; color: #fff; padding: 24px 16px; overflow-y: auto; }
     .sidebar h1 { font-size: 20px; margin: 0 0 24px; }
     .menu { list-style: none; padding: 0; margin: 0; }
     .menu li { margin-bottom: 12px; }
     .menu button { width: 100%; text-align: left; padding: 12px 14px; color: #fff; background: transparent; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; }
     .menu button.active, .menu button:hover { background: #374151; }
-    .content { padding: 24px; }
+    .content { padding: 24px; overflow-y: auto; }
+    .content::-webkit-scrollbar { width: 8px; }
+    .content::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+    .content::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+    .content::-webkit-scrollbar-track { background: transparent; }
     .section { display: none; }
     .section.active { display: block; }
     .panel { background: #fff; border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 8px 24px rgba(0,0,0,.08); }
