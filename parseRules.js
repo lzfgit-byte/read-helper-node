@@ -4,6 +4,7 @@ function getDefaultRules() {
   return {
     chapterPrefix: '第',
     chapterSuffixes: ['章', '回', '节'],
+    chapterKeywords: ['章', '回', '节'],
     minTitleLength: 2,
     maxTitleLength: 20,
     ignorePatterns: ['^\\s*$'],
@@ -13,11 +14,12 @@ function getDefaultRules() {
 }
 
 async function loadRules(rulesPath) {
+  const defaultRules = getDefaultRules();
   try {
     const content = fs.readFileSync(rulesPath, 'utf8');
-    return JSON.parse(content);
+    // Merge with defaults so older config files pick up newly added options.
+    return Object.assign(defaultRules, JSON.parse(content));
   } catch (error) {
-    const defaultRules = getDefaultRules();
     fs.writeFileSync(rulesPath, JSON.stringify(defaultRules, null, 2), 'utf8');
     return defaultRules;
   }
@@ -55,12 +57,15 @@ function canAppend(line, idx, lines, rules) {
 
 function isIsTitle(line, rules) {
   const prefix = (rules.chapterPrefix || '').trim();
-  const startsWith = prefix ? [prefix] : [];
   const extraStarts = Array.isArray(rules.titleStarts) ? rules.titleStarts : [];
-  const starts = startsWith.concat(extraStarts);
+  const keywords = Array.isArray(rules.chapterKeywords) ? rules.chapterKeywords : ['章', '回', '节'];
   const endsWith = Array.isArray(rules.chapterSuffixes) ? rules.chapterSuffixes : [];
   const containsStr = endsWith.concat(['创作手记', '后记', '楔子']);
-  const startsMatch = starts.some((item) => item && line.startsWith(item));
+  // A line starting with the chapter prefix (e.g. '第') only counts as a title
+  // when it also contains one of the configured keywords (e.g. '章', '回', '节').
+  const prefixMatch = prefix ? line.startsWith(prefix) : false;
+  const keywordMatch = keywords.some((item) => item && line.includes(item));
+  const startsMatch = (prefixMatch && keywordMatch) || extraStarts.some((item) => item && line.startsWith(item));
   const endsMatch = endsWith.some((item) => item && line.endsWith(item));
   const containsMatch = containsStr.some((item) => item && line.includes(item));
   const shortSeq = (line.includes('卷') && line.indexOf('卷') < 5) || (line.includes('序') && line.length < 15);

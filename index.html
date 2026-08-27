@@ -99,6 +99,8 @@
           <h2>解析规则</h2>
           <div class="field"><input id="rule-prefix" placeholder="章节前缀，例如：第" /></div>
           <div class="help-text">仅在标题检测中使用该前缀，例如“第”。</div>
+          <div class="field"><input id="rule-keywords" placeholder="前缀后需包含的关键字，例如：章,回,节" /></div>
+          <div class="help-text">以“第”开头的行还需包含这些关键字才会被识别为标题，多个关键字用逗号分隔。</div>
           <div class="field"><input id="rule-suffixes" placeholder="章节后缀，例如：章,回,节" /></div>
           <div class="help-text">多个后缀用逗号分隔，标题以这些后缀结尾时会被识别。</div>
           <div class="field"><input id="rule-max-title-length" placeholder="章节最大长度" type="number" /></div>
@@ -272,19 +274,22 @@
     async function loadRules() {
       const rules = await window.api.getRules();
       document.getElementById('rule-prefix').value = rules.chapterPrefix;
+      document.getElementById('rule-keywords').value = (rules.chapterKeywords || ['章', '回', '节']).join(',');
       document.getElementById('rule-suffixes').value = rules.chapterSuffixes.join(',');
       document.getElementById('rule-max-title-length').value = rules.maxTitleLength;
       document.getElementById('rule-empty-line').checked = !!rules.useEmptyLineAsTitle;
     }
 
     document.getElementById('save-rules').onclick = async () => {
-      const rules = {
+      const current = await window.api.getRules().catch(() => ({}));
+      const rules = Object.assign({}, current, {
         chapterPrefix: document.getElementById('rule-prefix').value.trim() || '第',
+        chapterKeywords: document.getElementById('rule-keywords').value.split(',').map((item) => item.trim()).filter(Boolean),
         chapterSuffixes: document.getElementById('rule-suffixes').value.split(',').map((item) => item.trim()).filter(Boolean),
         maxTitleLength: Number(document.getElementById('rule-max-title-length').value) || 30,
         ignorePatterns: ['^\\s*$'],
         useEmptyLineAsTitle: document.getElementById('rule-empty-line').checked
-      };
+      });
       await window.api.saveRules(rules);
       document.getElementById('server-status').innerText = '解析规则已保存';
     };
