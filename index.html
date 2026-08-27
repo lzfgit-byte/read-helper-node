@@ -218,7 +218,7 @@
       document.getElementById('edit-book-title').value = book.title || '';
       document.getElementById('edit-book-author').value = book.author || '';
       document.getElementById('edit-book-description').value = book.description || '';
-      document.getElementById('edit-book-cover').value = book.coverImg || '';
+      document.getElementById('edit-book-cover').value = book.coverImgSource ?? book.coverImg ?? '';
       document.getElementById('edit-book-directory').value = book.directoryEntries || '';
       document.getElementById('edit-modal').style.display = 'block';
     }

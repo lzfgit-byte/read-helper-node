@@ -38,6 +38,48 @@ function serializeForScript(value) {
     .replace(/\u2029/g, '\\u2029');
 }
 
+const COVER_PROXY_PATH = '/cover-proxy';
+const COVER_PROXY_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
+function buildCoverProxyUrl(coverImg, options = {}) {
+  const value = typeof coverImg === 'string' ? coverImg.trim() : '';
+  if (!value || !/^https?:\/\//i.test(value) || value.includes(`${COVER_PROXY_PATH}?url=`)) {
+    return value;
+  }
+  const proxyPath = `${COVER_PROXY_PATH}?url=${encodeURIComponent(value)}`;
+  return options.absolute ? `http://localhost:${serverPort}${proxyPath}` : proxyPath;
+}
+
+// Returns the book with `coverImg` replaced by the proxied URL and keeps the
+// original address in `coverImgSource` so edit forms don't save the proxy back.
+function decorateBookCover(book, options) {
+  if (!book) {
+    return book;
+  }
+  return {
+    ...book,
+    coverImg: buildCoverProxyUrl(book.coverImg, options),
+    coverImgSource: book.coverImg || ''
+  };
+}
+
+function sniffImageContentType(buffer, fallback) {
+  const ascii = (start, end) => buffer.subarray(start, end).toString('ascii');
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+    return 'image/jpeg';
+  }
+  if (buffer.length >= 3 && ascii(0, 3) === 'GIF') {
+    return 'image/gif';
+  }
+  if (buffer.length >= 4 && buffer[0] === 0x89 && ascii(1, 4) === 'PNG') {
+    return 'image/png';
+  }
+  if (buffer.length >= 12 && ascii(0, 4) === 'RIFF' && ascii(8, 12) === 'WEBP') {
+    return 'image/webp';
+  }
+  return fallback;
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1200,
@@ -64,6 +106,53 @@ function startStaticServer(openBrowser = false) {
   const appServer = express();
   appServer.use(express.json());
   appServer.use(express.urlencoded({ extended: true }));
+
+  // 封面图片代理：由后台请求外部封面地址再返回给前端，规避防盗链导致的封面无法显示。
+  // 注册在日志中间件之前，避免把图片二进制写入 API 日志。
+  appServer.get(COVER_PROXY_PATH, async (req, res) => {
+    const targetUrl = String(req.query.url || '');
+    let parsedUrl;
+    try {
+      parsedUrl = new URL(targetUrl);
+    } catch {
+      return res.status(400).send('无效的封面 URL');
+    }
+    if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+      return res.status(400).send('仅支持 http/https 封面地址');
+    }
+    const controller = new AbortController();
+    const timeoutTimer = setTimeout(() => controller.abort(), 15000);
+    try {
+      const upstream = await fetch(parsedUrl, {
+        redirect: 'follow',
+        signal: controller.signal,
+        headers: {
+          'User-Agent': COVER_PROXY_USER_AGENT,
+          Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8'
+        }
+      });
+      if (!upstream.ok) {
+        return res.status(502).send(`封面请求失败：HTTP ${upstream.status}`);
+      }
+      const upstreamType = (upstream.headers.get('content-type') || '').toLowerCase();
+      if (upstreamType.includes('text/html') || upstreamType.includes('json')) {
+        return res.status(502).send('封面来源拒绝访问（可能存在防盗链限制）');
+      }
+      const buffer = Buffer.from(await upstream.arrayBuffer());
+      const contentType = upstreamType.startsWith('image/')
+        ? upstreamType
+        : sniffImageContentType(buffer, upstreamType || 'image/jpeg');
+      res.set('Content-Type', contentType);
+      res.set('Cache-Control', 'public, max-age=86400');
+      return res.send(buffer);
+    } catch (error) {
+      const reason = error && error.name === 'AbortError' ? '请求超时' : (error && error.message) || '未知错误';
+      console.warn(`[cover-proxy] ${parsedUrl.href} ${reason}`);
+      return res.status(502).send(`封面请求失败：${reason}`);
+    } finally {
+      clearTimeout(timeoutTimer);
+    }
+  });
 
   appServer.use((req, res, next) => {
     const startTime = Date.now();
@@ -193,7 +282,7 @@ function startStaticServer(openBrowser = false) {
   });
 
   appServer.get('/', async (req, res) => {
-    const books = database.listBooks();
+    const books = database.listBooks().map((book) => decorateBookCover(book));
     const rows = books.map((book) => `
       <li class="book-item">
         <div class="book-meta">
@@ -312,7 +401,7 @@ function startStaticServer(openBrowser = false) {
         document.getElementById('editBookTitle').value = book.title || '';
         document.getElementById('editBookAuthor').value = book.author || '';
         document.getElementById('editBookDescription').value = book.description || '';
-        document.getElementById('editBookCover').value = book.coverImg || '';
+        document.getElementById('editBookCover').value = book.coverImgSource ?? book.coverImg ?? '';
         document.getElementById('editBookDirectory').value = book.directoryEntries || '';
         document.getElementById('editModal').classList.add('active');
       }
@@ -403,10 +492,11 @@ function startStaticServer(openBrowser = false) {
     if (!bookId) {
       return res.status(400).send('id 不能为空');
     }
-    const book = database.getBookById(Number(bookId));
-    if (!book) {
+    const storedBook = database.getBookById(Number(bookId));
+    if (!storedBook) {
       return res.status(404).send('书籍未找到');
     }
+    const book = decorateBookCover(storedBook);
     const html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"/><title>详情</title></head><body><a id="path" href="/bookinfo?id=${book.id}">${book.title}</a><img id="cover" src="${book.coverImg || ''}" style="max-width:200px;display:block;margin:16px 0;"/><div id="intro">${book.description}</div><div id="author">${book.author}</div></body></html>`;
     res.send(html);
   });
@@ -541,7 +631,7 @@ ipcMain.handle('upload-book', async (_, payload) => {
 });
 
 ipcMain.handle('get-books', async () => {
-  return database.listBooks();
+  return database.listBooks().map((book) => decorateBookCover(book, { absolute: true }));
 });
 
 ipcMain.handle('update-book', async (_, payload) => {
@@ -571,7 +661,7 @@ ipcMain.handle('parse-book', async (_, { bookId }) => {
   const rules = await loadRules(rulesPath);
   const directoryEntries = splitDirectoryEntries(book.directoryEntries);
   const chapters = parseTextToChapters(fileContent, rules, directoryEntries);
-  return { book, chapters };
+  return { book: decorateBookCover(book, { absolute: true }), chapters };
 });
 
 ipcMain.handle('get-rules', async () => {
