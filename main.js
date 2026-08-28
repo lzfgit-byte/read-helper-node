@@ -250,42 +250,63 @@ function startStaticServer(openBrowser = false) {
       </li>
     `).join('');
     const html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"/><title>书籍管理</title><style>
-      body{margin:0;font-family:'Segoe UI','Helvetica Neue',Arial,sans-serif;background:#f4f7fb;color:#0f172a;}
-      .container{max-width:1120px;margin:32px auto;padding:0 20px;}
-      .header{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap;margin-bottom:24px;}
-      .header-title{margin:0;line-height:1.1;}
-      .header-title h1{font-size:32px;margin:0;color:#0f172a;}
-      .header-title p{margin:8px 0 0;color:#475569;font-size:15px;}
-      .btn{display:inline-flex;align-items:center;justify-content:center;padding:12px 20px;border-radius:14px;border:none;font-weight:600;cursor:pointer;transition:all .2s ease;}
-      .btn-primary{background:#2563eb;color:#fff;box-shadow:0 18px 40px rgba(37,99,235,.18);}
-      .btn-primary:hover{transform:translateY(-1px);}
-      .book-list{list-style:none;margin:0;padding:0;display:grid;gap:16px;}
-      .book-item{display:flex;justify-content:space-between;align-items:center;gap:18px;padding:20px 24px;border-radius:24px;background:#fff;box-shadow:0 18px 40px rgba(15,23,42,.08);}
-      .book-meta{min-width:0;}
-      .book-meta h3{margin:0 0 8px;font-size:20px;color:#0f172a;}
-      .book-meta h3 a{color:inherit;text-decoration:none;}
-      .book-meta p{margin:0;color:#475569;font-size:14px;line-height:1.6;}
-      .book-meta img.cover-img{display:block;margin-top:10px;max-width:140px;border-radius:14px;object-fit:cover;box-shadow:0 16px 40px rgba(15,23,42,.08);}
-      .book-actions{display:flex;gap:16px;flex-wrap:wrap;}
-      .action-link{color:#2563eb;text-decoration:none;font-weight:600;}
-      .action-link:hover{text-decoration:underline;}
-      .message{display:none;padding:14px 18px;border-radius:16px;margin-bottom:20px;box-shadow:0 16px 30px rgba(15,23,42,.08);}
-      .message.info{background:#eff6ff;color:#0369a1;}
-      .message.error{background:#fee2e2;color:#991b1b;}
+      *{box-sizing:border-box;}
+      body{margin:0;font-family:'Segoe UI','Helvetica Neue','PingFang SC','Microsoft YaHei',Arial,sans-serif;background:#f4f7fb;color:#0f172a;min-height:100vh;}
+      ::selection{background:#bfdbfe;}
+      ::-webkit-scrollbar{width:10px;}
+      ::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:6px;border:2px solid #f4f7fb;}
+      ::-webkit-scrollbar-thumb:hover{background:#94a3b8;}
+      .container{max-width:1120px;margin:0 auto;padding:36px 20px 56px;}
+      .header{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:26px;}
+      .header-title{margin:0;line-height:1.15;}
+      .header-title h1{font-size:28px;margin:0;color:#0f172a;letter-spacing:.3px;}
+      .header-title p{margin:8px 0 0;color:#64748b;font-size:14px;}
+      .btn{display:inline-flex;align-items:center;justify-content:center;padding:11px 20px;border-radius:12px;border:none;font-weight:600;font-size:14px;cursor:pointer;transition:all .18s ease;}
+      .btn-primary{background:linear-gradient(135deg,#3b82f6,#2563eb);color:#fff;box-shadow:0 10px 24px rgba(37,99,235,.25);}
+      .btn-primary:hover{transform:translateY(-1px);box-shadow:0 14px 30px rgba(37,99,235,.32);}
+      .btn-primary:active{transform:translateY(0);box-shadow:0 6px 16px rgba(37,99,235,.25);}
+      button:focus-visible{outline:2px solid #93c5fd;outline-offset:2px;}
+      .book-list{list-style:none;margin:0;padding:0;display:grid;gap:14px;}
+      .book-item{display:flex;justify-content:space-between;align-items:center;gap:18px;padding:16px 20px;border-radius:16px;background:#fff;border:1px solid #e8edf3;box-shadow:0 3px 14px rgba(15,23,42,.05);transition:transform .18s ease,box-shadow .18s ease,border-color .18s ease;}
+      .book-item:hover{transform:translateY(-2px);box-shadow:0 12px 30px rgba(15,23,42,.09);border-color:#dbe7f5;}
+      .book-meta{min-width:0;display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;column-gap:18px;}
+      .book-meta:not(:has(.cover-img)){display:block;}
+      .book-meta h3{grid-column:2;align-self:end;margin:0 0 3px;font-size:19px;color:#0f172a;line-height:1.35;}
+      .book-meta h3 a{color:inherit;text-decoration:none;transition:color .15s ease;}
+      .book-meta h3 a:hover{color:#2563eb;}
+      .book-meta p{grid-column:2;align-self:start;margin:0;color:#64748b;font-size:13px;line-height:1.6;}
+      .book-meta img.cover-img{grid-column:1;grid-row:1 / span 3;display:block;height:104px;width:72px;object-fit:cover;border-radius:8px;border:1px solid #eef2f7;box-shadow:0 8px 20px rgba(15,23,42,.10);}
+      .book-list:empty::after{content:'暂无书籍，点击右上角「新增书籍」上传。';display:block;padding:48px 20px;text-align:center;color:#94a3b8;font-size:14px;background:#fff;border:1px dashed #e2e8f0;border-radius:16px;grid-column:1 / -1;}
+      .book-actions{display:flex;gap:10px;flex-wrap:wrap;}
+      .action-link{padding:8px 16px;border-radius:10px;border:1px solid #bfdbfe;background:#fff;color:#2563eb;text-decoration:none;font-weight:600;font-size:13px;cursor:pointer;font-family:inherit;transition:all .16s ease;}
+      .action-link:hover{background:#2563eb;border-color:#2563eb;color:#fff;text-decoration:none;transform:translateY(-1px);box-shadow:0 6px 14px rgba(37,99,235,.25);}
+      .book-actions .action-link:nth-child(2){border-color:#fecaca;color:#dc2626;}
+      .book-actions .action-link:nth-child(2):hover{background:#dc2626;border-color:#dc2626;color:#fff;box-shadow:0 6px 14px rgba(220,38,38,.25);}
+      .message{display:none;padding:13px 18px;border-radius:12px;margin-bottom:18px;font-size:14px;border:1px solid transparent;}
+      .message.info{background:#eff6ff;border-color:#bfdbfe;color:#075985;}
+      .message.error{background:#fef2f2;border-color:#fecaca;color:#991b1b;}
       .modal{position:fixed;inset:0;background:rgba(15,23,42,.55);display:none;align-items:center;justify-content:center;z-index:1000;}
       .modal.active{display:flex;}
-      .modal-panel{width:100%;max-width:640px;background:#fff;border-radius:28px;overflow:hidden;box-shadow:0 40px 100px rgba(15,23,42,.18);}
-      .modal-header{display:flex;justify-content:space-between;align-items:center;padding:24px 28px;border-bottom:1px solid #e2e8f0;}
-      .modal-header h2{margin:0;font-size:22px;color:#0f172a;}
-      .close-btn{border:none;background:transparent;color:#64748b;font-size:26px;cursor:pointer;line-height:1;}
-      .modal-body{padding:24px 28px;}
-      .field{margin-bottom:18px;}
-      .field label{display:block;margin-bottom:8px;font-size:14px;color:#475569;}
-      .field input[type=text],.field textarea,.field input[type=file]{width:100%;padding:14px 16px;border:1px solid #cbd5e1;border-radius:16px;background:#f8fafc;color:#0f172a;font-size:15px;}
-      .field textarea{min-height:120px;resize:vertical;}
-      .modal-footer{padding:20px 28px 28px;text-align:right;background:#f8fafc;}
-      .modal-footer .btn-secondary{margin-right:12px;background:#f8fafc;color:#334155;}
-      .hint{font-size:13px;color:#64748b;margin-top:6px;}
+      .modal-panel{width:100%;max-width:640px;background:#fff;border-radius:20px;overflow:hidden;box-shadow:0 32px 80px rgba(15,23,42,.25);animation:panelIn .18s ease;}
+      @keyframes panelIn{from{opacity:0;transform:translateY(12px) scale(.98);}to{opacity:1;transform:none;}}
+      .modal-header{display:flex;justify-content:space-between;align-items:center;padding:20px 26px;border-bottom:1px solid #e2e8f0;}
+      .modal-header h2{margin:0;font-size:19px;color:#0f172a;}
+      .close-btn{border:none;background:transparent;color:#64748b;font-size:24px;cursor:pointer;line-height:1;width:34px;height:34px;border-radius:8px;transition:all .15s ease;}
+      .close-btn:hover{background:#f1f5f9;color:#0f172a;}
+      .modal-body{padding:22px 26px;}
+      .field{margin-bottom:16px;}
+      .field label{display:block;margin-bottom:7px;font-size:13px;font-weight:600;color:#475569;}
+      .field input[type=text],.field textarea,.field input[type=file]{width:100%;padding:12px 14px;border:1px solid #d1d5db;border-radius:10px;background:#f8fafc;color:#0f172a;font-size:14px;font-family:inherit;transition:border-color .15s ease,box-shadow .15s ease,background .15s ease;}
+      .field input[type=text]:focus,.field textarea:focus{outline:none;background:#fff;border-color:#93c5fd;box-shadow:0 0 0 3px rgba(37,99,235,.12);}
+      .field textarea{min-height:110px;resize:vertical;}
+      .modal-footer{padding:16px 26px 22px;text-align:right;background:#f8fafc;border-top:1px solid #e2e8f0;}
+      .modal-footer .btn-secondary{margin-right:10px;background:#fff;color:#334155;border:1px solid #e2e8f0;box-shadow:none;}
+      .modal-footer .btn-secondary:hover{background:#f1f5f9;border-color:#cbd5e1;transform:none;}
+      .hint{font-size:12px;color:#94a3b8;margin-top:6px;}
+      @media (max-width:640px){
+        .book-item{flex-direction:column;align-items:flex-start;}
+        .book-actions{width:100%;justify-content:flex-end;}
+      }
     </style></head><body>
     <div class="container">
       <div class="header">
