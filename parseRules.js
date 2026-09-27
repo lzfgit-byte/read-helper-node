@@ -1,6 +1,7 @@
 const fs = require('fs');
 
-const TITLE_NUMBER_CHARS = '0-9一二三四五六七八九十百千万零两〇';
+// 章节序号可用的字符：阿拉伯数字、中文数字、大写中文数字
+const TITLE_NUMBER_CHARS = '0-9一二三四五六七八九十百千万零两〇壹贰叁肆伍陆柒捌玖拾佰仟廿卅';
 
 function getDefaultRules() {
   return {
@@ -39,27 +40,39 @@ function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-const strictTitleRegexCache = new Map();
+const titleMarkerRegexCache = new Map();
 
-// 严格数字模式：要求“前缀 + 数字/中文数字 + 关键字”，如 第12章、第一百零八章
-function matchesStrictTitle(line, prefix, keywords) {
+// 构建“前缀 + 数字/中文数字 + 关键字”的正则（如 第12章、第一百零八章），
+// anchored=true 时要求匹配行首，否则在行内任意位置匹配。
+function getTitleMarkerRegex(prefix, keywords, anchored) {
   const validKeywords = keywords.filter(Boolean);
-  const cacheKey = `${prefix}|${validKeywords.join(',')}`;
-  if (!strictTitleRegexCache.has(cacheKey)) {
+  const cacheKey = `${anchored ? '^' : ''}${prefix}|${validKeywords.join(',')}`;
+  if (!titleMarkerRegexCache.has(cacheKey)) {
     const keywordPart = validKeywords.map(escapeRegExp).join('|');
     let regex = null;
     if (prefix && keywordPart) {
       try {
-        regex = new RegExp(`^${escapeRegExp(prefix)}[${TITLE_NUMBER_CHARS}]+(?:${keywordPart})`);
+        regex = new RegExp(`${anchored ? '^' : ''}${escapeRegExp(prefix)}[${TITLE_NUMBER_CHARS}]+(?:${keywordPart})`);
       } catch {
         regex = null;
       }
     }
-    strictTitleRegexCache.set(cacheKey, regex);
+    titleMarkerRegexCache.set(cacheKey, regex);
   }
-  const regex = strictTitleRegexCache.get(cacheKey);
+  return titleMarkerRegexCache.get(cacheKey);
+}
+
+// 严格数字模式：要求“前缀 + 数字/中文数字 + 关键字”出现在行首
+function matchesStrictTitle(line, prefix, keywords) {
+  const regex = getTitleMarkerRegex(prefix, keywords, true);
   // 正则构建失败时退回宽松判断
   return regex ? regex.test(line) : true;
+}
+
+// 行内是否出现“第X章/回/节”这样的章节标记
+function hasTitleMarker(line, prefix, keywords) {
+  const regex = getTitleMarkerRegex(prefix, keywords, false);
+  return regex ? regex.test(line) : false;
 }
 
 // 标题归一化：连续空白（含全角空格）折叠为单个空格，成对书名号去掉
@@ -139,23 +152,20 @@ function isSeqContent(line) {
   return line.startsWith('-') && line.endsWith('-') && line.length < 5;
 }
 
+// 行尾出现这些符号视为句子/段落结束，需要换行
+const LINE_BREAK_ENDINGS = ['。', '！', '？', '；', '：', '”', '"', '…', '」', '』', '】'];
+
 function canAppend(line, idx, lines, rules) {
-  const afterEmpty = rules.useEmptyLineAsTitle && idx > 0 && idx < lines.length - 2 && lines[idx + 1].trim() === '' && lines[idx + 2].trim() === '';
-  const a = line.endsWith('。') ||
-    (line.startsWith('“') && line.endsWith('”')) ||
-    (line.startsWith('"') && line.endsWith('"')) ||
+  const nextLine = lines[idx + 1];
+  const nextIsEmpty = typeof nextLine === 'string' && nextLine.trim() === '';
+  const endsSentence = LINE_BREAK_ENDINGS.some((mark) => line.endsWith(mark)) ||
     (line.startsWith('…') && line.endsWith('…')) ||
-    line.endsWith('。”') ||
-    afterEmpty;
-  if (a) {
+    (line.startsWith('“') && line.endsWith('”')) ||
+    (line.startsWith('"') && line.endsWith('"'));
+  // 原文里的空行表示该行独立成行（诗句、签文、对白等），必须保留换行，
+  // 否则连续的多行会首尾黏连成一段。
+  if (endsSentence || nextIsEmpty) {
     return line + '<br/>\n';
-  }
-  if (idx > 1) {
-    const prev = lines[idx - 1];
-    const next = lines[idx + 1];
-    if (line.length < 20 && prev?.trim() === '' && next?.trim() === '') {
-      return line + '  ';
-    }
   }
   return line;
 }
@@ -177,7 +187,9 @@ function isIsTitle(line, rules) {
   }
   const keywordMatch = keywords.some((item) => item && line.includes(item));
   const startsMatch = (prefixMatch && keywordMatch) || extraStarts.some((item) => item && line.startsWith(item));
-  const endsMatch = endsWith.some((item) => item && line.endsWith(item));
+  // 以章节后缀结尾的行还必须带有“第X章/回/节”标记：
+  // “回、节、章”本身也是常用字，否则“唤尽东风总不回”这类句子会被误判为标题。
+  const endsMatch = endsWith.some((item) => item && line.endsWith(item)) && hasTitleMarker(line, prefix, endsWith);
   const containsMatch = containsStr.some((item) => item && line.includes(item));
   const shortSeq = (line.includes('卷') && line.indexOf('卷') < 5) || (line.includes('序') && line.length < 15);
   // If the line starts with a configured start (like '序章'), accept it as a title even
@@ -261,6 +273,39 @@ function normalizeDirectoryEntries(directoryEntries) {
   return entries.map((entry) => String(entry).trim()).filter(Boolean);
 }
 
+// 目录项匹配时忽略空白（含全角空格）差异
+function normalizeForMatch(value) {
+  return String(value == null ? '' : value).replace(/[\s\u3000]+/g, '');
+}
+
+const DIRECTORY_MIN_OVERLAP = 4;
+const DIRECTORY_MIN_OVERLAP_RATIO = 0.5;
+
+// 正文行与目录项的匹配：允许两侧有空白/截断差异，但子串重叠必须足够长，
+// 否则“戒石铭”这类正文词会命中“第十二回 … 言告状却送戒石铭”这样的长回目。
+function matchesDirectoryEntry(line, directoryEntries) {
+  const normalizedLine = normalizeForMatch(line);
+  if (!normalizedLine) {
+    return false;
+  }
+  return directoryEntries.some((entry) => {
+    const normalizedEntry = normalizeForMatch(entry);
+    if (!normalizedEntry) {
+      return false;
+    }
+    if (normalizedEntry === normalizedLine) {
+      return true;
+    }
+    const [shorter, longer] = normalizedEntry.length <= normalizedLine.length
+      ? [normalizedEntry, normalizedLine]
+      : [normalizedLine, normalizedEntry];
+    if (!longer.includes(shorter)) {
+      return false;
+    }
+    return shorter.length >= Math.max(DIRECTORY_MIN_OVERLAP, Math.ceil(longer.length * DIRECTORY_MIN_OVERLAP_RATIO));
+  });
+}
+
 function parseTextToChapters(text, rules = {}, directoryEntries = []) {
   const lines = (text == null ? '' : String(text)).split(/\r?\n/);
   const chapters = [];
@@ -281,7 +326,7 @@ function parseTextToChapters(text, rules = {}, directoryEntries = []) {
       continue;
     }
 
-    const isDirectoryEntry = normalizedDirectoryEntries.some(item => item.includes(line));
+    const isDirectoryEntry = matchesDirectoryEntry(line, normalizedDirectoryEntries);
     const isTitle = isDirectoryEntry || isIsTitle(line, rules);
     const isEmptyLineTitle = enableEmptyLineTitle && isMaybeTitle(line, i, lines, rules);
     if (isTitle || isEmptyLineTitle) {
@@ -303,4 +348,4 @@ function parseTextToChapters(text, rules = {}, directoryEntries = []) {
   return chapters;
 }
 
-module.exports = { getDefaultRules, loadRules, saveRules, parseTextToChapters, normalizeDirectoryEntries };
+module.exports = { getDefaultRules, loadRules, saveRules, parseTextToChapters, normalizeDirectoryEntries, matchesDirectoryEntry };

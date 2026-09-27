@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { parseTextToChapters, getDefaultRules, saveRules } = require('../parseRules');
+const { parseTextToChapters, getDefaultRules, saveRules, matchesDirectoryEntry } = require('../parseRules');
 
 test('uses configured directory entries as chapter titles', () => {
   const text = ['第一章', '正文内容一', '第二章', '正文内容二'].join('\n');
@@ -105,6 +105,63 @@ test('normalizes full-width spaces in titles', () => {
 
   assert.equal(chapters.length, 1);
   assert.equal(chapters[0].title, '第一章 出发');
+});
+
+test('verse lines ending with chapter suffix chars stay content and keep line breaks', () => {
+  const text = [
+    '第一章 玉娘',
+    '玉娘这一反常的表现，弄得张居正丈二和尚摸不着头脑。',
+    '原来是一张签文，上面写道：',
+    '',
+    '第三十五签 陌头杨柳 下下',
+    '',
+    '离巢燕子任翻飞',
+    '',
+    '唤尽东风总不回',
+    '',
+    '暮鼓晨钟憔悴甚',
+    '',
+    '年年空盼旅人归',
+    ''
+  ].join('\n');
+  const rules = getDefaultRules();
+
+  const chapters = parseTextToChapters(text, rules, []);
+
+  assert.equal(chapters.length, 1);
+  assert.equal(chapters[0].title, '第一章 玉娘');
+  assert.ok(!chapters.some((chapter) => chapter.title.includes('唤尽东风')));
+  assert.ok(chapters[0].content.includes('唤尽东风总不回<br/>\n暮鼓晨钟憔悴甚'));
+});
+
+test('directory entries do not promote short body lines to titles', () => {
+  const text = [
+    '第十二回 为济困贱卖龙泉剑 言告状却送戒石铭',
+    '李狗儿与陈大毛被提出州府大牢时，已交了亥时。',
+    '',
+    '戒石铭',
+    '',
+    '背面的颜骨小楷，写的是一段铭文：'
+  ].join('\n');
+  const rules = getDefaultRules();
+  const directoryEntries = ['第十二回 为济困贱卖龙泉剑 言告状却送戒石铭'];
+
+  const chapters = parseTextToChapters(text, rules, directoryEntries);
+
+  assert.equal(chapters.length, 1);
+  assert.equal(chapters[0].title, '第十二回 为济困贱卖龙泉剑 言告状却送戒石铭');
+  assert.ok(chapters[0].content.includes('戒石铭'));
+});
+
+test('directory entry matching requires significant overlap', () => {
+  const entries = ['第十二回 为济困贱卖龙泉剑 言告状却送戒石铭'];
+
+  assert.equal(matchesDirectoryEntry('第十二回 为济困贱卖龙泉剑 言告状却送戒石铭', entries), true);
+  assert.equal(matchesDirectoryEntry('第十二回为济困贱卖龙泉剑 言告状却送戒石铭', entries), true);
+  assert.equal(matchesDirectoryEntry('第十二回 为济困贱卖龙泉剑', entries), true);
+  assert.equal(matchesDirectoryEntry('戒石铭', entries), false);
+  assert.equal(matchesDirectoryEntry('龙泉剑', entries), false);
+  assert.equal(matchesDirectoryEntry('背面的颜骨小楷，写的是一段铭文：', entries), false);
 });
 
 test('saveRules normalizes invalid rule values', () => {
