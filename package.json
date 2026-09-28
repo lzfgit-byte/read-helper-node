@@ -21,7 +21,9 @@
     ],
     "icon": "public/icon.png",
     "win": {
-      "target": ["nsis"]
+      "target": [
+        "nsis"
+      ]
     },
     "nsis": {
       "oneClick": false,
@@ -34,6 +36,7 @@
   "dependencies": {
     "express": "^4.18.2",
     "multer": "^1.4.5-lts.1",
+    "qrcode-generator": "^2.0.4",
     "sql.js": "^1.14.1"
   },
   "devDependencies": {

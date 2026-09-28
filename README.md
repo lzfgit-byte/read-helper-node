@@ -32,6 +32,14 @@ Electron 应用，支持：
   - 保存为书籍后 `coverImg` 为 `/book-cover?id=<书籍id>`，由接口从 EPUB 文件中实时提取（内存缓存，取图无需重复解析）
   - 书籍编辑时封面留空会沿用自动封面地址，不会被清空
 - **正文图片统一块级展示**：每个 `<img>` 都会合并为 `style="display:block"`（保留原有其它样式声明），并在前后补 `<br/>` 分隔；图片旁已有的 `<br/>` 不会重复叠加，可用 `blockImages: false` 关闭
+- **章节注释统一挪到章节末尾**：本章内的注释块（多看/掌阅风格的隐藏 `div`、EPUB3 `aside`/`epub:type="footnote"`）与指向其它 xhtml 的注释链接（`<a href="notes.xhtml#fn1">`）都会被收集，从正文原位移除后追加到章节末尾，编号按注释标记在正文中的出现顺序排列：
+
+  ```
+  【注释】
+  [1] 第一条注释内容
+  [2] 第二条注释内容
+  ```
+  注号（`duokan-footnote-number`）、注释包裹 `span`、段落标签会被清理，注释内的图片同样会内嵌 base64；可用 `notesToEnd: false` 关闭，用 `notesTitle` 自定义标题（默认 `【注释】`）
 - `head` 中的本地样式表会内联进章节内容，脚本与内联事件会被剔除
 - 可「保存为书籍」，解析出的目录项会保存为章节标题
 
@@ -60,7 +68,7 @@ Electron 应用，支持：
 - `POST /data-operate/epub/upload`：上传 EPUB，解析元数据并保存为书籍
 - `GET /book-cover?id=<bookId>`：按书籍 id 返回 EPUB 提取出的封面图片
 - `GET /epub-covers/<sha1>.<ext>`：未保存 EPUB 的封面缓存
-- IPC：`parseEpubFile({ filePath, inlineImages, inlineStyles, includeText, unwrapImages, blockImages })`、`uploadEpubBook({ filePath, title, author, description })`
+- IPC：`parseEpubFile({ filePath, inlineImages, inlineStyles, includeText, unwrapImages, blockImages, notesToEnd, notesTitle })`、`uploadEpubBook({ filePath, title, author, description })`
 
 解析由 `epubParser.js` 完成，内置最小 ZIP 读取实现（只用 Node 的 `zlib`），无需额外依赖。
 

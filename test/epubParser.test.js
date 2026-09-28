@@ -395,6 +395,106 @@ test('keeps images untouched when blockImages is disabled', () => {
   assert.ok(content.includes(`src="data:image/png;base64,${PNG_BASE64}"`));
 });
 
+test('collects chapter notes and appends them at the end', () => {
+  const files = [
+    { name: 'mimetype', data: 'application/epub+zip' },
+    { name: 'META-INF/container.xml', data: CONTAINER_XML },
+    { name: 'OEBPS/content.opf', data: OPF_XML },
+    { name: 'OEBPS/images/pic.png', data: PNG_BUFFER },
+    {
+      name: 'OEBPS/chapter1.xhtml',
+      data: `<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml"><body>
+<h1>注释章节</h1>
+<p>第一段<span class="duokan-footnote-item" id="fn1"><sup><a href="#fn1">1</a></sup></span>正文。</p>
+<p>第二段<span class="duokan-footnote-item" id="fn2"><sup><a href="#fn2">2</a></sup></span>正文。</p>
+<div class="duokan-footnote-content" id="fn2" style="display:none">
+  <p class="duokan-footnote-paragraph"><span class="duokan-footnote-number">2</span><span class="duokan-footnote-text">注释二</span></p>
+</div>
+<div class="duokan-footnote-content" id="fn1" style="display:none">
+  <p class="duokan-footnote-paragraph"><span class="duokan-footnote-number">1</span><span class="duokan-footnote-text">注释一</span></p>
+</div>
+</body></html>`,
+      compress: true
+    },
+    {
+      name: 'OEBPS/chapter2.xhtml',
+      data: '<?xml version="1.0" encoding="UTF-8"?><html xmlns="http://www.w3.org/1999/xhtml"><body><p>二</p></body></html>'
+    }
+  ];
+  const content = parseEpubBuffer(createZip(files)).chapters[0].content;
+
+  assert.ok(content.includes('【注释】'), '应带注释标题');
+  assert.ok(content.includes('[1] 注释一'), '注释一应被编号收集');
+  assert.ok(content.includes('[2] 注释二'), '注释二应被编号收集');
+  // 编号按正文中标记出现的顺序（fn1 的块在后面，但标记在前）
+  assert.ok(content.indexOf('[1] 注释一') < content.indexOf('[2] 注释二'));
+  // 注释块从正文原位置移除，且出现在章节末尾
+  assert.ok(!content.includes('duokan-footnote-content'), '注释块应被移除');
+  assert.ok(!content.includes('duokan-footnote-number'), '注释注号应被清理');
+  assert.equal(content.split('注释一').length - 1, 1, '注释内容只应出现一次');
+  assert.ok(content.indexOf('【注释】') > content.indexOf('第二段'), '注释应在正文之后');
+});
+
+test('collects notes that live in a separate xhtml file', () => {
+  const files = [
+    { name: 'mimetype', data: 'application/epub+zip' },
+    { name: 'META-INF/container.xml', data: CONTAINER_XML },
+    { name: 'OEBPS/content.opf', data: OPF_XML },
+    { name: 'OEBPS/images/pic.png', data: PNG_BUFFER },
+    {
+      name: 'OEBPS/chapter1.xhtml',
+      data: `<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml"><body>
+<h1>跨文件注释</h1>
+<p>正文<a class="noteref" href="notes.xhtml#n1">1</a>继续。</p>
+</body></html>`,
+      compress: true
+    },
+    {
+      name: 'OEBPS/notes.xhtml',
+      data: '<html><body><div id="n1">跨文件注释内容</div></body></html>',
+      compress: true
+    },
+    {
+      name: 'OEBPS/chapter2.xhtml',
+      data: '<?xml version="1.0" encoding="UTF-8"?><html xmlns="http://www.w3.org/1999/xhtml"><body><p>二</p></body></html>'
+    }
+  ];
+  const content = parseEpubBuffer(createZip(files)).chapters[0].content;
+
+  assert.ok(content.includes('【注释】'));
+  assert.ok(content.includes('[1] 跨文件注释内容'));
+  assert.equal(content.split('跨文件注释内容').length - 1, 1);
+  assert.ok(content.indexOf('【注释】') > content.indexOf('继续'));
+});
+
+test('keeps notes in place when notesToEnd is disabled', () => {
+  const files = [
+    { name: 'mimetype', data: 'application/epub+zip' },
+    { name: 'META-INF/container.xml', data: CONTAINER_XML },
+    { name: 'OEBPS/content.opf', data: OPF_XML },
+    { name: 'OEBPS/images/pic.png', data: PNG_BUFFER },
+    {
+      name: 'OEBPS/chapter1.xhtml',
+      data: `<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml"><body>
+<p>正文。</p>
+<div class="duokan-footnote-content" id="fn1" style="display:none"><p>注释一</p></div>
+</body></html>`,
+      compress: true
+    },
+    {
+      name: 'OEBPS/chapter2.xhtml',
+      data: '<?xml version="1.0" encoding="UTF-8"?><html xmlns="http://www.w3.org/1999/xhtml"><body><p>二</p></body></html>'
+    }
+  ];
+  const content = parseEpubBuffer(createZip(files), { notesToEnd: false, notesTitle: '【本章注释】' }).chapters[0].content;
+
+  assert.ok(content.includes('duokan-footnote-content'), '关闭后注释块应保留在原位');
+  assert.ok(!content.includes('【本章注释】'));
+});
+
 test('throws on a file that is not a zip', () => {
   assert.throws(() => parseEpubBuffer(Buffer.from('not a zip file')), /ZIP/);
 });

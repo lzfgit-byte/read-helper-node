@@ -617,6 +617,242 @@ function blockifyContentImages(html) {
   return output;
 }
 
+// ---------------------------------------------------------------------------
+// 章节注释：把脚注/尾注（注释）收集起来统一放到章节末尾
+// ---------------------------------------------------------------------------
+
+const NOTE_CONTAINER_TAGS = ['div', 'aside', 'section', 'p', 'li', 'blockquote'];
+// 行内注释标记（如 <sup><a class="duokan-footnote-item">），不是注释正文
+const NOTE_MARKER_PATTERN = /footnote-item|footnote-ref|note-ref|noteref|duokan-footnote-item/i;
+const NOTE_WORD_PATTERN = /footnote|endnote|annotation|duokan|zhushi|注释|注解|脚注|尾注|(?:^|[\s_-])note(?:[\s_-]|$)/i;
+
+function escapeRegExp(value) {
+  return String(value == null ? '' : value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// 按标签名扫描元素块，处理同名标签嵌套的平衡匹配；只有 accept 命中的块才返回
+function scanElementBlocks(html, tagNames, accept) {
+  const source = String(html || '');
+  const names = tagNames.join('|');
+  const pattern = new RegExp(`<(${names})\\b([^>]*?)(/?)>|<\\/(${names})\\s*>`, 'gi');
+  const blocks = [];
+  const stack = [];
+  let match;
+  while ((match = pattern.exec(source))) {
+    if (match[0].startsWith('</')) {
+      const frame = stack.pop();
+      if (frame && frame.accepted) {
+        blocks.push({
+          tagName: frame.tagName,
+          rawAttrs: frame.rawAttrs,
+          attrs: frame.attrs,
+          start: frame.start,
+          end: match.index + match[0].length,
+          inner: source.slice(frame.innerStart, match.index)
+        });
+      }
+      continue;
+    }
+    const tagName = match[1];
+    const rawAttrs = match[2] || '';
+    const selfClosing = match[3] === '/' || /\/\s*$/.test(rawAttrs);
+    const attrs = parseAttributes(rawAttrs);
+    const accepted = accept(tagName, rawAttrs, attrs);
+    if (selfClosing) {
+      if (accepted) {
+        blocks.push({ tagName, rawAttrs, attrs, start: match.index, end: pattern.lastIndex, inner: '' });
+      }
+      continue;
+    }
+    stack.push({ tagName, rawAttrs, attrs, accepted, start: match.index, innerStart: pattern.lastIndex });
+  }
+  return blocks.sort((a, b) => a.start - b.start);
+}
+
+// 是否是注释正文块（本章内的隐藏注释等），排除行内注释标记
+function isNoteContainer(tagName, attrs) {
+  const type = `${attrs['epub:type'] || ''} ${attrs.role || ''}`;
+  const marker = `${attrs.class || ''} ${attrs.id || ''} ${type}`;
+  if (NOTE_MARKER_PATTERN.test(marker)) {
+    return false;
+  }
+  if (/(footnote|endnote|annotation|note)/i.test(type)) {
+    return true;
+  }
+  if (!NOTE_WORD_PATTERN.test(marker)) {
+    return false;
+  }
+  // 带 note/注释 关键字的普通标签只在明确是注释容器时才算，避免误伤正文
+  return tagName === 'div' || tagName === 'aside' || tagName === 'section' ||
+    /注释|注解|脚注|尾注|footnote|endnote/i.test(marker);
+}
+
+// 注释正文清理：去掉注号与注释包裹标签、段落转 <br/>、去掉行首注释编号
+function normalizeNoteContent(html) {
+  let text = String(html || '')
+    .replace(/<span\b[^>]*class\s*=\s*["'][^"']*(?:footnote-number|note-number)[^"']*["'][^>]*>[\s\S]*?<\/span>/gi, '');
+  // 去掉注释相关的包裹标签，只保留其内容
+  for (let pass = 0; pass < 3; pass++) {
+    const before = text;
+    text = text.replace(
+      /<span\b[^>]*class\s*=\s*["'][^"']*(?:duokan-footnote|footnote-text|note-text|footnote-content)[^"']*["'][^>]*>([\s\S]*?)<\/span>/gi,
+      '$1'
+    );
+    if (text === before) {
+      break;
+    }
+  }
+  return text
+    .replace(/<p\b[^>]*>/gi, '')
+    .replace(/<\/p\s*>/gi, '<br/>')
+    .replace(/(?:\s*<br\s*\/?>\s*)+/gi, '<br/>')
+    .replace(/^(?:\s|<br\s*\/?>)+/i, '')
+    .replace(/(?:\s|<br\s*\/?>)+$/i, '')
+    .replace(/^[\[(（【]\s*\d{1,3}\s*[\])）】]\s*/, '')
+    .replace(/^\d{1,3}[.、]\s+/, '')
+    .trim();
+}
+
+// 注释标记（承载注释 id 的元素或指向它的链接）在正文里的位置
+function findMarkerPosition(html, id) {
+  if (!id) {
+    return -1;
+  }
+  const safe = escapeRegExp(id);
+  const patterns = [
+    new RegExp(`\\sid\\s*=\\s*["']${safe}["']`, 'i'),
+    new RegExp(`(?:xlink:)?href\\s*=\\s*["'][^"']*#${safe}["']`, 'i')
+  ];
+  let position = -1;
+  for (const pattern of patterns) {
+    const match = pattern.exec(html);
+    if (match && (position < 0 || match.index < position)) {
+      position = match.index;
+    }
+  }
+  return position;
+}
+
+// 指向其它 xhtml 的注释链接（注释正文在单独文件里的情况）
+function findNoteReferences(html, baseDir, loader) {
+  const source = String(html || '');
+  const refs = [];
+  const anchorRegex = /<a\b([^>]*?)>([\s\S]*?)<\/a>/gi;
+  let match;
+  while ((match = anchorRegex.exec(source))) {
+    const attrs = parseAttributes(match[1]);
+    const href = attrs.href || attrs['xlink:href'] || '';
+    const hashIndex = href.indexOf('#');
+    if (hashIndex <= 0) {
+      continue;
+    }
+    const target = href.slice(0, hashIndex);
+    const id = href.slice(hashIndex + 1);
+    if (!target || !id || /^(?:data|https?|mailto):/i.test(target)) {
+      continue;
+    }
+    const text = normalizeText(stripTags(match[2]));
+    const marker = `${attrs.class || ''} ${attrs.id || ''} ${text}`;
+    const isNumberMarker = /^[\[(（【]?\d{1,3}[\])）】]?$/.test(text);
+    if (!isNumberMarker && !NOTE_WORD_PATTERN.test(marker)) {
+      continue;
+    }
+    if (!loader.load(target, baseDir)) {
+      continue;
+    }
+    refs.push({ target, id, position: match.index });
+  }
+  return refs;
+}
+
+// 从其它 xhtml 里按 id 取注释正文
+function findElementById(html, id) {
+  const source = String(html || '');
+  if (!id) {
+    return '';
+  }
+  const idPattern = new RegExp(`\\sid\\s*=\\s*["']${escapeRegExp(id)}["']`, 'i');
+  const match = idPattern.exec(source);
+  if (!match) {
+    return '';
+  }
+  const tagStart = source.lastIndexOf('<', match.index);
+  if (tagStart < 0) {
+    return '';
+  }
+  const nameMatch = source.slice(tagStart + 1).match(/^([a-zA-Z][\w:-]*)/);
+  if (!nameMatch) {
+    return '';
+  }
+  const block = scanElementBlocks(source.slice(tagStart), [nameMatch[1]], (tagName, rawAttrs) => idPattern.test(rawAttrs))[0];
+  return block ? block.inner : '';
+}
+
+/**
+ * 把章节里的注释挪到章节末尾，返回 { html, notesHtml }：
+ * html 为删掉注释块后的正文，notesHtml 形如
+ * `<br/>【注释】<br/>[1] 注释一<br/>[2] 注释二<br/>`
+ * 编号按注释标记在正文中出现的顺序排列。
+ */
+function collectChapterNotes(bodyHtml, baseDir, loader, options = {}) {
+  const source = String(bodyHtml || '');
+  const title = typeof options.notesTitle === 'string' && options.notesTitle.trim()
+    ? options.notesTitle.trim()
+    : '【注释】';
+  const candidates = scanElementBlocks(
+    source,
+    NOTE_CONTAINER_TAGS,
+    (tagName, rawAttrs, attrs) => isNoteContainer(tagName, attrs)
+  ).filter((block) => block.inner && block.inner.trim());
+  // 嵌套的注释块只保留最外层，避免同一条注释被重复收集
+  const blocks = candidates.filter((block) => !candidates.some((other) =>
+    other !== block && other.start <= block.start && other.end >= block.end));
+
+  let cleaned = source;
+  for (const block of [...blocks].sort((a, b) => b.start - a.start)) {
+    cleaned = `${cleaned.slice(0, block.start)}${cleaned.slice(block.end)}`;
+  }
+
+  const notes = [];
+  const seen = new Set();
+  const addNote = (id, content, fallbackPosition) => {
+    const text = normalizeNoteContent(content);
+    if (!text) {
+      return;
+    }
+    const key = id || `#${fallbackPosition}`;
+    if (seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    notes.push({ id, content: text, fallbackPosition });
+  };
+
+  for (const block of blocks) {
+    addNote(block.attrs.id || '', block.inner, block.start);
+  }
+  for (const ref of findNoteReferences(cleaned, baseDir, loader)) {
+    if (!ref.id || seen.has(ref.id)) {
+      continue;
+    }
+    const resource = loader.load(ref.target, baseDir);
+    if (resource) {
+      addNote(ref.id, findElementById(decodeText(resource.data), ref.id), ref.position);
+    }
+  }
+
+  if (notes.length === 0) {
+    return { html: source, notesHtml: '' };
+  }
+  for (const note of notes) {
+    const position = findMarkerPosition(cleaned, note.id);
+    note.position = position >= 0 ? position : note.fallbackPosition;
+  }
+  notes.sort((a, b) => a.position - b.position);
+  const lines = notes.map((note, index) => `[${index + 1}] ${note.content}`);
+  return { html: cleaned, notesHtml: `<br/>${title}<br/>${lines.join('<br/>')}<br/>` };
+}
+
 // 把章节文档处理成“自包含”的 HTML 片段：内联样式 + 图片转 base64 data URI
 function inlineResources(documentHtml, baseDir, loader, options, images) {
   const inlineImages = options.inlineImages !== false;
@@ -626,6 +862,12 @@ function inlineResources(documentHtml, baseDir, loader, options, images) {
     ? ''
     : collectHeadStyles(headMatch ? headMatch[1] : '', baseDir, loader, options, images);
   let output = extractBody(source);
+
+  // 1. 章节注释（脚注/尾注）统一挪到章节末尾，图片类步骤随后会一并处理注释里的图
+  if (options.notesToEnd !== false) {
+    const collected = collectChapterNotes(output, baseDir, loader, options);
+    output = `${collected.html}${collected.notesHtml}`;
+  }
 
   // 2. 仅包含一张图片的 <svg> 包裹，直接替换为 <img> 以简化前端渲染
   output = inlineImages ? output.replace(/<svg\b([^>]*)>([\s\S]*?)<\/svg>/gi, (whole, svgAttrs, inner) => {
@@ -714,6 +956,8 @@ function parseEpubBuffer(input, options = {}) {
     includeChapters: options.includeChapters !== false,
     unwrapImages: options.unwrapImages !== false,
     blockImages: options.blockImages !== false,
+    notesToEnd: options.notesToEnd !== false,
+    notesTitle: options.notesTitle,
     maxChapters: Number.isFinite(options.maxChapters) && options.maxChapters > 0 ? options.maxChapters : Infinity
   };
   const buffer = Buffer.isBuffer(input) ? input : Buffer.from(input);
@@ -885,5 +1129,7 @@ module.exports = {
   decodeText,
   htmlToText,
   unwrapImageWrappers,
-  blockifyContentImages
+  blockifyContentImages,
+  collectChapterNotes,
+  scanElementBlocks
 };

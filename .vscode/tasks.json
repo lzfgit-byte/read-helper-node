@@ -1,0 +1,33 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "test",
+			"type": "shell",
+			"command": "node --test \"test/*.test.js\"",
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "epub: e2e notes check",
+			"type": "shell",
+			"command": "node tmp-e2e-notes.js",
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "epub: cleanup tmp",
+			"type": "shell",
+			"command": "Remove-Item tmp-e2e-notes.js,tmp-note-debug.js -ErrorAction SilentlyContinue; Get-ChildItem -Name tmp-* -ErrorAction SilentlyContinue; Write-Output 'cleanup-done'",
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "test",
+			"type": "shell",
+			"command": "node --test \"test/*.test.js\"",
+			"problemMatcher": [],
+			"group": "test"
+		}
+	]
+}

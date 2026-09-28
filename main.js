@@ -375,7 +375,9 @@ function startStaticServer(openBrowser = false) {
       inlineImages: body.inlineImages !== 'false' && body.inlineImages !== false,
       inlineStyles: body.inlineStyles !== 'false' && body.inlineStyles !== false,
       unwrapImages: body.unwrapImages !== 'false' && body.unwrapImages !== false,
-      blockImages: body.blockImages !== 'false' && body.blockImages !== false
+      blockImages: body.blockImages !== 'false' && body.blockImages !== false,
+      notesToEnd: body.notesToEnd !== 'false' && body.notesToEnd !== false,
+      notesTitle: typeof body.notesTitle === 'string' ? body.notesTitle : undefined
     };
   }
 
@@ -1102,12 +1104,12 @@ ipcMain.handle('upload-book', async (_, payload) => {
 });
 
 ipcMain.handle('parse-epub-file', async (_, payload = {}) => {
-  const { filePath, inlineImages, inlineStyles, includeText, unwrapImages, blockImages, maxChapters } = payload;
+  const { filePath, inlineImages, inlineStyles, includeText, unwrapImages, blockImages, notesToEnd, notesTitle, maxChapters } = payload;
   if (!filePath || !fs.existsSync(filePath)) {
     throw new Error('未找到 EPUB 文件');
   }
   const buffer = fs.readFileSync(filePath);
-  const parsed = parseEpubBuffer(buffer, { inlineImages, inlineStyles, includeText, unwrapImages, blockImages, maxChapters });
+  const parsed = parseEpubBuffer(buffer, { inlineImages, inlineStyles, includeText, unwrapImages, blockImages, notesToEnd, notesTitle, maxChapters });
   return {
     ...parsed,
     fileName: path.basename(filePath),
