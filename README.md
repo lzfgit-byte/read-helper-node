@@ -40,12 +40,12 @@ Electron 应用，支持：
 - 选择 `.epub` 文件后上传，自动读取书名、作者、简介与封面
 - 按 `spine` 顺序输出章节，章节标题优先取 `<h1>~<h6>`，其次取 NCX/Nav 目录标题
 - **标题被拆到不同 xhtml 时自动合并**：某章没有正文（空内容或只有标题）、下一章有正文，且两个标题合起来仍符合章节规则时，合并为一个目录（如「第十二章」+「风起云涌」→「第十二章 风起云涌」，正文跟在合并后的目录后）。判断逻辑与 TXT 章节解析完全共用（`parseRules.js` 的 `mergeChapterTitles`），服务端会把当前章节规则传进来；插图页（只含 `<img>`）和下一章本身是完整「第X章」标题的情况不合并，合并后的章节会带 `sourceHrefs` 便于排查
-- 章节内的图片（`<img>`、SVG `<image>`、CSS `url(...)`）默认转成 `data:<mime>;base64,...` **全部内嵌**在返回的 HTML 中，正文自包含、离线也能看图，前端无需再请求图片接口
-  - **默认不设总量上限**：一本 340 张图的 85 MB 书会内嵌约 72 MB base64（图片不做压缩转换，只做 base64），这是“图片都能看到”的前提
-  - **整本一次性解析不会爆内存**：`/content` 只解析请求的那一章（`/bookinfo` 的链接带 `&index=`，解析时只给这一章生成图片，其余章节只保留结构），单章图片量与内存只跟这一章有关
+- 章节内的图片（`<img>`、SVG `<image>`、CSS `url(...)`）默认转成可加载的地址嵌在返回的 HTML 中：HTTP 接口给**绝对 URL**（见下节，legado 的 Coil3 加载不了 `data:` 与相对地址），IPC/Electron 预览给 `data:<mime>;base64,...`
+  - **默认不设总量上限**：一本 340 张图的 85 MB 书若选 base64 会内嵌约 72 MB（图片只做 base64，不做压缩转换）
+  - **整本一次性解析不会爆内存**：`/content` 只解析请求的那一章（`/bookinfo` 的链接带 `&index=`，解析时只给这一章生成图片，其余章节只保留结构）
   - 单张图片上限 8 MB（`maxImageBytes`），更大的单张图会跳过并计入 `skippedImages`；`maxInlineImageBytes` 给正数时才启用整本总量预算（超限的图片会改用按需地址或跳过）
   - **字体等非图片资源默认不内嵌**：同一字体常被多章引用，base64 会在每章重复一份（某本书光字体就 23 MB）→ 统一改为按需地址，需要旧行为可传 `inlineFonts: true`
-  - 可用 `imageMode: 'url'` 把图片改成按需地址（`/epub-image?id=<书籍id>&href=<书籍内路径>`，从 EPUB 里实时取出 + LRU 缓存）、`imageMode: 'none'` 完全不处理图片；未保存的解析（没有书籍 id）会退到 `ebook-assets` 磁盘缓存，返回 `/ebook-assets/<sha1>.<ext>`
+  - 图片地址可选：`imageMode: 'url'`（默认给绝对地址）、`'inline'`（base64）、`'none'`；未保存的解析（没有书籍 id）会退到 `ebook-assets` 磁盘缓存，返回 `/ebook-assets/<sha1>.<ext>` 的绝对地址
   - 统计在 `stats` 里：`imageMode`（`inline`/`url`/`none`）、`imageCount`（引用张数）、`inlinedImages`（base64 张数）、`imageBytes`、`skippedImages`（改用按需或跳过）
 - **正文图片直接内联展示**：多看书系等 EPUB 会把插图/注号图包成 `<sup><a href="..."><img/></a></sup>`，解析时会把这类「只包图片」的 `sup`/`sub`/`a` 包裹层去掉，只保留 `<img>` 本身（带文字的正常链接不动）；可用 `unwrapImages: false` 关闭
 - **懒加载图片（微信读书等导出）**：`<img data-src="..." src="占位/相对路径">` 这类写法里，base64 只会写进真正的 `src`（不再误改 `data-src`）；`src` 是空值或 1×1 占位图时会改用 `data-src` / `data-original` 等属性指向的书内图片，保证阅读器上真得能显示出图
@@ -105,7 +105,7 @@ Electron 应用，支持：
 - **分章方式**：优先按 PDF 书签（`/Outlines`，支持 `Dest` 与 `A /D`，按层级取 `level`）分章，书签指向的页码区间即章节正文；没有书签时降级为「每页一章」，标题为 `第 N 页`（可用 `chapterMode: 'page'` 强制按页）
 - 同样执行**目录合并**：某个目录没有正文（空内容或只有标题）、下一个目录有正文，且两个标题合起来仍符合章节规则时合并为一条（与 TXT/EPUB 共用 `parseRules.mergeChapterTitles`）
 - **文本抽取**：内容流支持 `BT/ET`、`Tf/TL/Td/TD/T*/Tm`、`Tj`、`'`、`"`、`TJ`（水平间距 ≤ -200 判为空格），并会递归进入 `Do` 调用的 Form XObject；段落按行合并（上一行以 `。！？；：…——”"'）】》」』〕）\]\)．.!?;` 结尾或长度不足 8 字则不合并）
-- **正文图片全部 base64 内嵌（默认，正文自包含、离线也能看）**：页面内容流里 `Do` 到的图片按「文本 / 图片」出现的先后顺序插进章节正文
+- **正文图片默认给绝对地址（阅读 App 只能加载这种地址）**：页面内容流里 `Do` 到的图片按「文本 / 图片」出现的先后顺序插进章节正文，地址形如 `http://<请求 Host>/pdf-page?id=<书籍id>&page=12&name=Im0`（每页实时解码 + LRU 32 缓存）；传 `imageMode: 'inline'` 可改成 base64 内嵌
   - 图片位置优先按 y 坐标从大到小排序（PDF 原点在左下角），文字与图片都能拿到坐标时更接近视觉顺序；坐标不可比（进入过 Form XObject）时退回内容流顺序；同一章里重复引用的同一张图只嵌一次
   - **整本一次性解析不会因为图片多而爆内存**：`/content` 只解析请求的那一章（`/bookinfo` 的链接带 `&index=`，解析器只给这一章生成图片，其余章节只保留结构），单章字节数 ≈ 这一章的图片大小
   - 需要 URL 形式时可显式传 `imageMode: 'url'`（配 `/pdf-page` 按需地址）或 `'none'`；`maxInlineImageBytes` 给正数时才会在超总量时降级（默认 0 = 不限），`imageMode: 'url'` 配合 `/pdf-page` 时图片每页实时解码 + LRU 小缓存
@@ -151,9 +151,24 @@ Electron 应用，支持：
 
 `parse-epub-file` / `POST /data-operate/epub/parse` 返回会多一个 `format` 字段（`epub` / `pdf`）便于前端区分展示，`book` 摘要里也带 `format/pageCount/outlineCount/scanned/imageCount/warnings`。
 
-阅读器的两个内部接口都走同一条解析链路：`/bookinfo`（只列目录）传 `inlineImages: false`，链接里带 `&index=<章节下标>`；`/content` 用这个下标只解析那一章（正文图片为 base64，可离线阅读）。
+阅读器的两个内部接口都走同一条解析链路：`/bookinfo`（只列目录）传 `inlineImages: false`，链接里带 `&index=<章节下标>`；`/content` 用这个下标只解析那一章。
 
-> 正文图片默认一律 base64：如果客户端只能显示内嵌图片（部分阅读器/书源不加载正文图片地址），保持默认即可，不需要传 `imageMode`。
+### 正文图片地址：为什么默认 base64
+
+对照 legado 源码（`data/src/commonMain/.../analyzeRule/AnalyzeUrlCore.kt`、`ui/.../page/provider/ReaderImageResolver.kt`）：
+
+- **网络书**（书源书籍）：取图走 `ReaderImageResolver` → `AnalyzeUrlCore(rawUrl = src)`，而 `AnalyzeUrlCore.getByteArrayIfDataUri()` **支持 `data:` URI**（`if (!url.isDataUrl()) return null; … MimeBase64Decoder.decode(...)`）→ **base64 能显示** ✓；相对地址会被 `NetworkUtils.getAbsoluteURL(baseUrl, src)` 按书籍地址拼成 HTTP 地址（拼不对就 404），所以不要用相对地址
+- **本地书**（把 epub 文件直接导入阅读器）：`EpubFile.getBody` 会保留 `data:` URI（`if (src.isDataUrl())`），但随后 `FileBook.getImage(book, src)` 只在包内按 href 找资源 → 本地书适合用书内相对 href
+
+因此默认策略是：
+
+| 场景 | 默认 | 说明 |
+| --- | --- | --- |
+| HTTP（`/content`、`POST /data-operate/epub/parse|upload`） | **base64 内嵌** | 网络书书源链路能直接显示；传 `?images=url`（或 `imageMode=url`）才改发绝对地址 |
+| IPC / Electron 界面预览 | **base64 内嵌** | Chromium 支持 `data:` |
+| 可选 | `imageMode: 'url'` | 发 `http://<请求 Host>/epub-image?id=..&href=..` 绝对地址，图片按需从书籍里取（LRU 缓存） |
+
+图片标签里的 `data-src` / `data-original` / `data-lazy-src` / `data-url` / `srcset` 在换地址时会一并清掉：legado 的 `AnalyzeUrlCore` 对**非 data:** 的 src 会按书籍地址拼绝对地址，留着这些"候选"反而容易被拼成拿不到的 404 地址。
 
 ## 测试
 

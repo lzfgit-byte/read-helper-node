@@ -205,9 +205,11 @@ test('writes the inlined image into the real src, not into data-src', () => {
   const tags = chapter.content.match(/<img\b[^>]*>/gi) || [];
 
   assert.equal(tags.length, 3, `三个 img（实际 ${tags.length}）`);
-  // 1. 原样是 data-src + src，data-src 保持远程地址不变，src 换成按需地址
-  assert.ok(tags[0].includes('data-src="https://example.com/remote.jpg"'), `data-src 不该被改写：${tags[0]}`);
+  // 1. 原样是 data-src + src：src 换成可显示的地址，data-src 这类懒加载候选被清掉
   assert.ok(tags[0].includes('src="/epub-image?id=1&href=OEBPS%2Fimages%2Fpic.png"'), `src 应被改写：${tags[0]}`);
+  assert.ok(!tags[0].includes('data-src'), `data-src 应被清掉（否则阅读器可能去取它）：${tags[0]}`);
+  assert.ok(tags[0].includes('data-ratio="1.363"'), '其它 data-* 属性保留');
+  assert.ok(tags[0].includes('class="calibre3"'), 'class 保留');
   // 2. src 是占位图时，用 data-src 指向的本地图片
   assert.ok(!tags[1].includes('src="data:image/gif'), `占位图应被替换：${tags[1]}`);
   assert.ok(tags[1].includes('src="/epub-image?id=1&href=OEBPS%2Fimages%2Fpic.png"'), `占位图替换：${tags[1]}`);
@@ -222,7 +224,7 @@ test('inlines lazy loaded images as base64 when within budget', () => {
 
   assert.equal(tags.length, 3);
   assert.ok(tags.every((tag) => tag.includes(`src="data:image/png;base64,${payload}"`)), '三张图都以 base64 内嵌');
-  assert.ok(tags[0].includes('data-src="https://example.com/remote.jpg"'), 'data-src 保持原样');
+  assert.ok(!tags[0].includes('data-src'), '懒加载候选属性被清掉');
   assert.equal(result.stats.imageCount, 1, '同一张图只记一次（去重后的引用数）');
   assert.equal(result.stats.inlinedImages, 3, '三处引用都做了内嵌');
 });

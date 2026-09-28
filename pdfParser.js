@@ -1375,16 +1375,40 @@ function parsePdfBuffer(input, options = {}) {
         }
         flushText();
         if (imageMode === 'url') {
-          const url = buildPageImageUrl(settings.imageUrlBase, page.index + 1, block.name);
           const xobject = resolveDict(objects, xobjects[block.name]);
-          imageState.emitted += 1;
-          chapterImages.push({
-            page: page.index + 1,
-            name: block.name,
-            url,
-            mediaType: isStream(xobject) ? imageFilterMediaType(xobject, objects) : ''
-          });
-          parts.push(toUrlImageHtml(url));
+          if (settings.imageUrlBase) {
+            const url = buildPageImageUrl(settings.imageUrlBase, page.index + 1, block.name);
+            imageState.emitted += 1;
+            chapterImages.push({
+              page: page.index + 1,
+              name: block.name,
+              url,
+              mediaType: isStream(xobject) ? imageFilterMediaType(xobject, objects) : ''
+            });
+            parts.push(toUrlImageHtml(url));
+            continue;
+          }
+          // 未保存的解析（没有书籍 id）：解码后写盘，用缓存地址
+          const cachedImage = decodeImageObject(resolveRef(objects, xobjects[block.name]), objects, imageLimits);
+          const cachedUrl = cachedImage && settings.resourceCache
+            ? settings.resourceCache({
+              href: `page:${page.index + 1}/${block.name}`,
+              mediaType: cachedImage.mediaType,
+              data: cachedImage.data
+            })
+            : '';
+          if (cachedUrl) {
+            imageState.emitted += 1;
+            chapterImages.push({
+              page: page.index + 1,
+              name: block.name,
+              url: cachedUrl,
+              mediaType: cachedImage.mediaType
+            });
+            parts.push(toUrlImageHtml(cachedUrl));
+            continue;
+          }
+          imageState.skipped += 1;
           continue;
         }
         // 内嵌模式：同一章里重复引用的同一张图只嵌一次

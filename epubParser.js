@@ -292,6 +292,16 @@ function pickImageHref(attrs) {
   return attrs.src || attrs['xlink:href'] || attrs.href || '';
 }
 
+// 地址已经换成可显示的值后，去掉懒加载候选属性与 srcset，
+// 避免别的阅读器（如 legado 的 Coil 加载链路）又去取那个取不到的原始地址
+function stripLazyImageAttributes(tag) {
+  let output = String(tag);
+  for (const name of LAZY_SRC_ATTRIBUTES) {
+    output = output.replace(new RegExp(`\\s${name}\\s*=\\s*("[^"]*"|'[^']*'|[^\\s>]+)`, 'gi'), '');
+  }
+  return output.replace(/\ssrcset\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '');
+}
+
 
 function normalizeText(value) {
   return String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
@@ -1111,10 +1121,13 @@ function inlineResources(documentHtml, baseDir, loader, options, images) {
       // 只替换真正的 src 属性：不要把 data-src / srcset 里的 "src=" 也当成目标
       const replaced = whole.replace(/(\s)src\s*=\s*("([^"]*)"|'([^']*)')/i, (match, space) => `${space}src="${resource.src}"`);
       if (replaced !== whole) {
-        return replaced;
+        // 已经换成可显示的地址，去掉懒加载候选属性，避免别的阅读器又去取那个取不到的地址
+        return stripLazyImageAttributes(replaced);
       }
       // 只有 data-src（懒加载占位）时补一个 src，保证阅读器能显示
-      return whole.replace(/^<img\b/i, (match) => `${match} src="${resource.src}"`);
+      return stripLazyImageAttributes(
+        whole.replace(/^<img\b/i, (match) => `${match} src="${resource.src}"`)
+      );
     });
   }
 

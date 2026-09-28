@@ -169,9 +169,25 @@ function cacheEbookResource(resource) {
   return `${EBOOK_ASSETS_PATH}/${encodeURIComponent(fileName)}`;
 }
 
-// 未保存解析时的解析选项：超预算资源写盘取地址，避免图片直接消失或内存爆掉
-function readResourceCacheOptions() {
-  return { resourceCache: (resource) => cacheEbookResource(resource) };
+// 未保存解析时的解析选项：超预算资源写盘取地址，避免图片直接消失或内存爆掉。
+// 传 req 时回绝对地址（legado 阅读页只能加载 http(s) 绝对 URL）。
+function readResourceCacheOptions(req) {
+  const base = req ? requestBaseOf(req) : '';
+  return {
+    resourceCache: (resource) => {
+      const cachedPath = cacheEbookResource(resource);
+      return cachedPath ? `${base}${cachedPath}` : '';
+    }
+  };
+}
+
+// 当前请求对外可访问的根地址（书源/阅读器用的就是它，不能写死 localhost）
+function requestBaseOf(req) {
+  const host = req && typeof req.get === 'function' ? req.get('host') : '';
+  if (!host) {
+    return `http://localhost:${serverPort}`;
+  }
+  return `${req.protocol}://${host}`;
 }
 
 // 已保存书籍的封面地址（相对路径，由 /book-cover 从原文件里提取）
@@ -362,14 +378,15 @@ function loadBookChapters(book, rules, directoryEntries, options = {}) {
       inlineImages: options.inlineImages !== false
     };
     // 正文图片保持 base64 内嵌（阅读器离线也能看图）；只在调用方显式要求时才用按需地址
-    if (kind === 'pdf') {
-      if (options.imageMode) {
-        parseOptions.imageMode = options.imageMode;
-        parseOptions.imageUrlBase = `${PDF_PAGE_PATH}?id=${book.id}`;
-      }
+    if (typeof options.imageUrlBase === 'string' && options.imageUrlBase) {
+      // 调用方给了地址（一般是当前请求的绝对地址）：图片走 URL，章节 HTML 保持很小
+      parseOptions.imageMode = options.imageMode || 'url';
+      parseOptions.imageUrlBase = options.imageUrlBase;
     } else if (options.imageMode) {
       parseOptions.imageMode = options.imageMode;
-      parseOptions.imageUrlBase = `${EPUB_IMAGE_PATH}?id=${book.id}`;
+      parseOptions.imageUrlBase = kind === 'pdf'
+        ? `${PDF_PAGE_PATH}?id=${book.id}`
+        : `${EPUB_IMAGE_PATH}?id=${book.id}`;
     }
     // 一次只取一章时，只给这一章生成图片数据（内存与耗时都只跟这一章有关）
     if (Number.isInteger(options.imageChapterIndex) && options.imageChapterIndex >= 0) {
@@ -627,9 +644,18 @@ function startStaticServer(openBrowser = false) {
     limits: { fileSize: 300 * 1024 * 1024 }
   });
 
-  function readEpubOptions(body = {}) {
+  function readEpubOptions(req = {}) {
+    const body = (req && req.body) || {};
+    const explicitMode = ['inline', 'url', 'none'].includes(body.imageMode) ? body.imageMode : '';
+    const inlineFlag = body.inlineImages === 'true' || body.inlineImages === true
+      ? 'inline'
+      : (body.inlineImages === 'false' || body.inlineImages === false ? 'none' : '');
     return {
       inlineImages: body.inlineImages !== 'false' && body.inlineImages !== false,
+      // 正文图片默认 base64：legado 网络书籍取图走 AnalyzeUrlCore，它支持 data: URI
+      // （AnalyzeUrlCore.getByteArrayIfDataUri）；相对地址会被它按 baseUrl 拼成拿不到的地址。
+      // 需要 http 绝对地址时可传 imageMode=url。
+      imageMode: explicitMode || inlineFlag || 'inline',
       inlineStyles: body.inlineStyles !== 'false' && body.inlineStyles !== false,
       unwrapImages: body.unwrapImages !== 'false' && body.unwrapImages !== false,
       blockImages: body.blockImages !== 'false' && body.blockImages !== false,
@@ -641,14 +667,12 @@ function startStaticServer(openBrowser = false) {
       maxInlineImageBytes: Number.isFinite(Number(body.maxInlineImageBytes)) && body.maxInlineImageBytes !== ''
         ? Number(body.maxInlineImageBytes)
         : undefined,
-      // PDF 专用：inline=base64 内嵌 / url=按需地址
-      ...readImageOptions(body),
-      // 未保存的解析：超预算资源写盘后返回 /ebook-assets/<sha1>.<ext>
-      ...readResourceCacheOptions()
+      // 未保存的解析：超预算图片/字体写盘后用 /ebook-assets 绝对地址
+      ...readResourceCacheOptions(req)
     };
   }
 
-  // 上传并解析 EPUB/PDF，返回章节内容（章节图片已内嵌 base64；封面以 URL 返回）
+  // 上传并解析 EPUB/PDF，返回章节内容（图片地址可访问；封面以 URL 返回）
   appServer.post('/data-operate/epub/parse', epubUpload.single('file'), async (req, res) => {
     const file = req.file;
     if (!file || !file.buffer || file.buffer.length === 0) {
@@ -657,7 +681,7 @@ function startStaticServer(openBrowser = false) {
     try {
       const kind = ebookKindOf(file.originalname) || (isPdfBuffer(file.buffer) ? 'pdf' : 'epub');
       const parsed = parseEbookBuffer(file.buffer, file.originalname, {
-        ...readEpubOptions(req.body),
+        ...readEpubOptions(req),
         rules: await loadRules(rulesPath)
       });
       return res.json({
@@ -689,7 +713,7 @@ function startStaticServer(openBrowser = false) {
     let parsed = null;
     const epubRules = await loadRules(rulesPath);
     try {
-      parsed = parseEbookBuffer(file.buffer, file.originalname, { ...readEpubOptions(req.body), rules: epubRules });
+      parsed = parseEbookBuffer(file.buffer, file.originalname, { ...readEpubOptions(req), rules: epubRules });
     } catch (error) {
       console.warn(`[${kind}] 解析失败 ${file.originalname}：${error.message}`);
     }
@@ -1119,19 +1143,33 @@ function startStaticServer(openBrowser = false) {
     const isEbook = isEbookBook(book);
     const rules = await loadRules(rulesPath);
     const entries = splitDirectoryEntries(book.directoryEntries);
+    const kind = bookEbookKind(book);
     const chunkIdOf = (position) => crypto.createHash('md5').update(`${book.id}-${position}`).digest('hex');
     let chapterContent = '';
+
+    // 正文图片默认 base64（legado 取图链路支持 data: URI，离线也能看）；
+    // 传 ?images=url 可改为当前请求的绝对地址（适合能直接拉图的客户端）。
+    const wantsUrl = String(req.query.images || '').toLowerCase() === 'url';
+    const imageOptions = isEbook && wantsUrl
+      ? {
+        imageMode: 'url',
+        imageUrlBase: `${requestBaseOf(req)}${kind === 'pdf' ? PDF_PAGE_PATH : EPUB_IMAGE_PATH}?id=${book.id}`
+      }
+      : {};
 
     // 优先用 /bookinfo 带上来的下标，只解析这一章（其余章节不生成图片数据）
     const indexParam = Number(req.query.index);
     if (isEbook && Number.isInteger(indexParam) && indexParam >= 0 && chunkIdOf(indexParam) === id) {
-      const { chapters } = loadBookChapters(book, rules, entries, { imageChapterIndex: indexParam });
+      const { chapters } = loadBookChapters(book, rules, entries, {
+        ...imageOptions,
+        imageChapterIndex: indexParam
+      });
       chapterContent = (chapters[indexParam] && chapters[indexParam].content) || '';
     }
 
     // 没有下标（或合并后下标发生变化）：退回到整本解析再按 id 匹配
     if (!chapterContent) {
-      const { chapters } = loadBookChapters(book, rules, entries);
+      const { chapters } = loadBookChapters(book, rules, entries, imageOptions);
       chapters.forEach((chapter, index) => {
         if (chunkIdOf(index) === id) {
           chapterContent = isEbook ? chapter.content : chapter.content.replace(/\n/g, '<br/>');
@@ -1179,7 +1217,7 @@ function startStaticServer(openBrowser = false) {
       .chapter.open .chapter-body{display:block;}
     </style></head><body><div class="container">
       <h1>电子书上传解析</h1>
-      <p class="sub">上传 EPUB / PDF 文件后即可解析章节，电子书内的图片会以 base64 data URI 内嵌在返回的 HTML 中，封面则通过 URL 提供。</p>
+      <p class="sub">上传 EPUB / PDF 文件后即可解析章节，章节图片默认以 base64 内嵌返回（离线也能看）；传 imageMode=url 可改为图片地址。封面通过 URL 提供。</p>
       <div id="message" class="msg info"></div>
       <div class="card">
         <div class="field"><label>电子书文件（EPUB / PDF）</label><input id="file" type="file" accept=".epub,.pdf,application/epub+zip,application/pdf" /></div>
@@ -1191,7 +1229,7 @@ function startStaticServer(openBrowser = false) {
           <button id="parseBtn">上传并解析</button>
           <button id="saveBtn" class="ghost">保存为书籍</button>
         </div>
-        <div class="hint">章节图片已是 base64，封面则通过封面 URL 加载。</div>
+        <div class="hint">章节图片默认以 base64 内嵌返回（阅读 App 的取图链路支持 data: URI）；需要图片地址时可传 imageMode=url。封面通过封面 URL 加载。</div>
       </div>
       <div id="result"></div>
     </div>
@@ -1415,7 +1453,7 @@ ipcMain.handle('parse-epub-file', async (_, payload = {}) => {
     chapterMode,
     maxInlineImageBytes,
     ...readImageOptions(payload),
-    ...readResourceCacheOptions(),
+    ...readResourceCacheOptions(null),
     rules: await loadRules(rulesPath)
   });
   return {
