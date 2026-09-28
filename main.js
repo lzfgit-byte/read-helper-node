@@ -1195,6 +1195,22 @@ ipcMain.handle('update-book', async (_, payload) => {
   });
 });
 
+ipcMain.handle('delete-book', async (_, bookId) => {
+  const id = Number(bookId);
+  if (!Number.isFinite(id)) {
+    throw new Error('id 不能为空');
+  }
+  const book = database.getBookById(id);
+  if (!book) {
+    throw new Error('书籍未找到');
+  }
+  database.deleteBook(book.id);
+  if (book.storedPath && fs.existsSync(book.storedPath)) {
+    fs.unlinkSync(book.storedPath);
+  }
+  return { message: '删除成功', id: book.id };
+});
+
 ipcMain.handle('open-book-folder', async (_, bookId) => {
   const book = database.getBookById(bookId);
   if (!book) {

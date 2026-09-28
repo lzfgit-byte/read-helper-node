@@ -50,6 +50,8 @@
     .book-actions button { width: auto; margin-right: 0; padding: 6px 12px; font-size: 12px; border-radius: 6px; }
     .book-actions button.secondary { background: #e5e7eb; color: #111827; }
     .book-actions button.secondary:hover { background: #d1d5db; }
+    .book-actions button.danger { background: #fee2e2; color: #b91c1c; }
+    .book-actions button.danger:hover { background: #dc2626; color: #fff; }
     .book-empty { padding: 40px 0; text-align: center; color: #6b7280; font-size: 14px; }
     .modal-mask { position: fixed; inset: 0; background: rgba(15,23,42,.55); z-index: 1000; display: flex; align-items: center; justify-content: center; }
     .modal { width: min(680px, 92vw); max-height: 86vh; background: #fff; border-radius: 16px; box-shadow: 0 24px 64px rgba(15,23,42,.25); display: flex; flex-direction: column; overflow: hidden; animation: modal-in .18s ease; }
@@ -410,6 +412,7 @@
             <div class="book-actions">
               <button onclick='parseBook(${book.id})'>解析章节</button>
               <button onclick='editBookById(${book.id})'>编辑</button>
+              <button class="danger" onclick='deleteBook(${book.id})'>删除</button>
               <button class="secondary" onclick='openBookFolder(${book.id})'>打开文件夹</button>
             </div>
           </div>
@@ -423,6 +426,20 @@
         await window.api.openBookFolder(bookId);
       } catch (error) {
         alert(error.message || '打开文件夹失败');
+      }
+    }
+
+    async function deleteBook(bookId) {
+      const book = booksById.get(String(bookId));
+      const title = book && book.title ? book.title : '该书籍';
+      if (!confirm(`确认删除《${title}》？书籍记录和本地文件都会被删除。`)) {
+        return;
+      }
+      try {
+        await window.api.deleteBook(bookId);
+        loadBooks();
+      } catch (error) {
+        alert(error.message || '删除失败');
       }
     }
 
