@@ -1215,10 +1215,15 @@ function imageFilterMediaType(xobject, objects) {
   return 'application/octet-stream';
 }
 
+// 正文图片格式与 EPUB 保持一致：只保留 src + alt + width/height + display:block
+function buildContentImageTag(src) {
+  const safeSrc = String(src == null ? '' : src).replace(/"/g, '&quot;');
+  return `<img src="${safeSrc}" alt="" width="100%" height="100%" style="display:block">`;
+}
+
 // 正文图片按 EPUB 的样式输出：块级 + 前后 <br/> 分隔
 function toInlineImageHtml(image) {
-  return `<br/><img src="data:${image.mediaType};base64,${image.data.toString('base64')}"`
-    + ' style="display:block;max-width:100%;height:auto;" /><br/>';
+  return `<br/>${buildContentImageTag(`data:${image.mediaType};base64,${image.data.toString('base64')}`)}<br/>`;
 }
 
 // 按需出图：正文只放一个地址，图片由 /pdf-page 逐页提供（扫描版不会撑爆内存）
@@ -1230,7 +1235,7 @@ function buildPageImageUrl(base, pageNumber, name) {
 }
 
 function toUrlImageHtml(url) {
-  return `<br/><img src="${url}" style="display:block;max-width:100%;height:auto;" /><br/>`;
+  return `<br/>${buildContentImageTag(url)}<br/>`;
 }
 
 // 首页图片作为封面（DCT → jpeg，Flate → PNG）

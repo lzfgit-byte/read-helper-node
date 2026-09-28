@@ -4,6 +4,14 @@ const zlib = require('zlib');
 const { parseEpubBuffer, readEpubResource } = require('../epubParser');
 const { getDefaultRules } = require('../parseRules');
 
+// --- 图片标签格式：正文图片只允许 src + alt + width/height + display:block ---
+const CONTENT_IMAGE_TAG = /^<img src="[^"]*" alt="" width="100%" height="100%" style="display:block">$/;
+
+function assertContentImageTag(tag, label = '') {
+  assert.match(String(tag), CONTENT_IMAGE_TAG, `图片只能保留固定属性 ${label}：${tag}`);
+  assert.ok(!/\s(data-[\w-]+|class|srcset|style="[^"]*;)/.test(String(tag)), `不应有其它属性 ${label}：${tag}`);
+}
+
 // --- 极简 ZIP 打包（仅测试用），支持 store 与 deflate 两种方式 ---
 const CRC_TABLE = (() => {
   const table = new Int32Array(256);
@@ -164,18 +172,29 @@ function createSampleEpub(overrides = {}) {
 
 // 微信读书等导出：真正要显示的地址在 data-src（或 src 是 1×1 占位图）时，
 // base64 必须写进真正的 src，否则阅读器上图片不显示
-function createLazyImageEpub() {
-  const chapter = `<?xml version="1.0" encoding="UTF-8"?>
+const LAZY_CHAPTER = `<?xml version="1.0" encoding="UTF-8"?>
 <html xmlns="http://www.w3.org/1999/xhtml">
   <body>
     <h1>作者简介</h1>
     <div class="qrbodypic">
-      <img alt="" data-ratio="1.363" data-src="https://example.com/remote.jpg" src="images/pic.png" class="calibre3"/>
+      <img alt="" data-ratio="1.304" data-w data-w-new data-src="https://example.com/remote.jpg" src="images/pic.png" class="calibre3"/>
     </div>
     <p><img src="${PLACEHOLDER_GIF}" data-src="images/pic.png" alt="占位图"/></p>
     <p><img data-src="images/pic.png" alt="只有 data-src"/></p>
   </body>
 </html>`;
+
+// 取不到本地资源（外链 / data-original 覆盖）时，也必须清掉懒加载候选属性：
+// legado 的 HtmlFormatter.formatKeepImg 发现 data-src / data-original 就只会用它
+const LAZY_UNRESOLVED_CHAPTER = `<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <body>
+    <p><img src="https://example.com/remote.jpg" data-src="images/pic.png" srcset="images/pic.png 1x"/></p>
+    <p><img src="images/pic.png" data-original="https://example.com/remote.jpg"/></p>
+  </body>
+</html>`;
+
+function createLazyImageEpub(chapter = LAZY_CHAPTER) {
   return createZip([
     { name: 'mimetype', data: 'application/epub+zip' },
     { name: 'META-INF/container.xml', data: CONTAINER_XML, compress: true },
@@ -208,13 +227,13 @@ test('writes the inlined image into the real src, not into data-src', () => {
   // 1. 原样是 data-src + src：src 换成可显示的地址，data-src 这类懒加载候选被清掉
   assert.ok(tags[0].includes('src="/epub-image?id=1&href=OEBPS%2Fimages%2Fpic.png"'), `src 应被改写：${tags[0]}`);
   assert.ok(!tags[0].includes('data-src'), `data-src 应被清掉（否则阅读器可能去取它）：${tags[0]}`);
-  assert.ok(tags[0].includes('data-ratio="1.363"'), '其它 data-* 属性保留');
-  assert.ok(tags[0].includes('class="calibre3"'), 'class 保留');
   // 2. src 是占位图时，用 data-src 指向的本地图片
   assert.ok(!tags[1].includes('src="data:image/gif'), `占位图应被替换：${tags[1]}`);
   assert.ok(tags[1].includes('src="/epub-image?id=1&href=OEBPS%2Fimages%2Fpic.png"'), `占位图替换：${tags[1]}`);
   // 3. 只有 data-src 时补出 src
   assert.ok(tags[2].includes('src="/epub-image?id=1&href=OEBPS%2Fimages%2Fpic.png"'), `补出 src：${tags[2]}`);
+  // 三张图都只保留固定属性（data-ratio / class / srcset 等一律丢掉）
+  tags.forEach((tag, index) => assertContentImageTag(tag, `第 ${index + 1} 张`));
 });
 
 test('inlines lazy loaded images as base64 when within budget', () => {
@@ -224,9 +243,30 @@ test('inlines lazy loaded images as base64 when within budget', () => {
 
   assert.equal(tags.length, 3);
   assert.ok(tags.every((tag) => tag.includes(`src="data:image/png;base64,${payload}"`)), '三张图都以 base64 内嵌');
-  assert.ok(!tags[0].includes('data-src'), '懒加载候选属性被清掉');
+  tags.forEach((tag, index) => assertContentImageTag(tag, `第 ${index + 1} 张`));
+  // 逐字相等：data-ratio / data-w / data-w-new / class / data-src 等一个都不留
+  tags.forEach((tag) => assert.equal(
+    tag,
+    `<img src="data:image/png;base64,${payload}" alt="" width="100%" height="100%" style="display:block">`,
+    `图片只能输出固定格式：${tag}`
+  ));
   assert.equal(result.stats.imageCount, 1, '同一张图只记一次（去重后的引用数）');
   assert.equal(result.stats.inlinedImages, 3, '三处引用都做了内嵌');
+});
+
+test('strips lazy image attributes even when the resource cannot be resolved', () => {
+  const result = parseEpubBuffer(createLazyImageEpub(LAZY_UNRESOLVED_CHAPTER));
+  const tags = result.chapters[0].content.match(/<img\b[^>]*>/gi) || [];
+
+  assert.equal(tags.length, 2);
+  // 外链取不到本地资源：保留原 src（阅读器至少还能去试试），但清掉 data-src / srcset
+  assert.ok(tags[0].includes('src="https://example.com/remote.jpg"'), `src 保持原样：${tags[0]}`);
+  assert.ok(!/data-src\s*=/.test(tags[0]), `data-src 应被清掉：${tags[0]}`);
+  assert.ok(!/srcset\s*=/.test(tags[0]), `srcset 应被清掉：${tags[0]}`);
+  // data-original 会覆盖 src，取不到它时也必须清掉，否则阅读器会去请求那个地址
+  assert.ok(!/data-original\s*=/.test(tags[1]), `data-original 应被清掉：${tags[1]}`);
+  assert.ok(tags[1].includes('src="data:image/png;base64,'), `本地图片仍内嵌：${tags[1]}`);
+  tags.forEach((tag, index) => assertContentImageTag(tag, `第 ${index + 1} 张`));
 });
 
 test('parses epub metadata and spine chapters', () => {
@@ -454,7 +494,10 @@ test('resolves relative image paths and svg wrappers', () => {
   assert.equal(result.chapters[0].title, 'SVG 章节');
   assert.ok(result.chapters[0].content.includes(`<img src="data:image/png;base64,${PNG_BASE64}"`));
   assert.ok(!result.chapters[0].content.includes('<svg'));
-  assert.ok(result.chapters[0].content.includes('width="100"'));
+  assertContentImageTag(
+    (result.chapters[0].content.match(/<img\b[^>]*>/) || [''])[0],
+    '（SVG 里的 image 也要用固定格式）'
+  );
 });
 
 test('unwraps images from sup/a wrappers so they render inline', () => {
@@ -542,17 +585,17 @@ test('renders body images as blocks separated by <br/>', () => {
   const content = parseEpubBuffer(createZip(files)).chapters[0].content;
 
   assert.ok(content.includes('<br/><img '), '图片前应有 <br/> 且图片直接内联');
-  assert.ok(/<img\b[^>]*style="display:block"[^>]*\/><br\/>/.test(content), '图片后应有 <br/> 与块级样式');
-  // 原有样式保留，display 被替换为 block
-  assert.ok(content.includes('style="display:block; width:100%"'));
+  assert.ok(/<img\b[^>]*style="display:block"><br\/>/.test(content), '图片后应有 <br/> 与块级样式');
+  // 图片格式固定：原有的 style / alt 等一律被固定写法取代
+  const tags = content.match(/<img\b[^>]*>/gi) || [];
+  assert.equal(tags.length, 5);
+  tags.forEach((tag, index) => assertContentImageTag(tag, `第 ${index + 1} 张`));
   assert.ok(!content.includes('display:inline'));
   // 四周本来就有的 <br/> 不会重复叠加
   assert.ok(!content.includes('<br/><br/>'));
   // 每张图前后都各有一个 <br/>
-  const imageCount = (content.match(/<img\b/g) || []).length;
-  assert.equal(imageCount, 5);
-  assert.equal((content.match(/<br\/>\s*<img\b/g) || []).length, imageCount, '每张图前应有 <br/>');
-  assert.equal((content.match(/<img\b[^>]*?\/>\s*<br\/>/g) || []).length, imageCount, '每张图后应有 <br/>');
+  assert.equal((content.match(/<br\/>\s*<img\b/g) || []).length, tags.length, '每张图前应有 <br/>');
+  assert.equal((content.match(/<img\b[^>]*>\s*<br\/>/g) || []).length, tags.length, '每张图后应有 <br/>');
 });
 
 test('keeps images untouched when blockImages is disabled', () => {
@@ -573,8 +616,9 @@ test('keeps images untouched when blockImages is disabled', () => {
   ];
   const content = parseEpubBuffer(createZip(files), { blockImages: false }).chapters[0].content;
 
-  assert.ok(content.includes('style="display:inline"'));
+  // blockImages:false 只影响前后的 <br/>，图片标签本身始终是固定格式
   assert.ok(!content.includes('<br/>'));
+  assertContentImageTag((content.match(/<img\b[^>]*>/) || [''])[0]);
   assert.ok(content.includes(`src="data:image/png;base64,${PNG_BASE64}"`));
 });
 

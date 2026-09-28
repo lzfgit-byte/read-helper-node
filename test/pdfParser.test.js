@@ -382,7 +382,12 @@ test('inlines page illustrations as base64 like epub', () => {
 
   assert.equal(result.stats.imageCount, 1, `内嵌 1 张（实际 ${result.stats.imageCount}）`);
   assert.match(chapter.content, /<img src="data:image\/jpeg;base64,/);
-  assert.match(chapter.content, /style="display:block/, '图片为块级样式');
+  // 正文图片固定格式：src + alt + width/height + display:block，不带其它属性
+  assert.match(
+    chapter.content,
+    /<img src="data:image\/jpeg;base64,[^"]*" alt="" width="100%" height="100%" style="display:block">/,
+    '图片只保留固定属性'
+  );
   assert.match(chapter.content, /<br\/><img/, '图片前有 <br/> 分隔');
   assert.ok(chapter.content.indexOf('Before image paragraph') < chapter.content.indexOf('<img'),
     '图片位置在正文顺序中保留');
@@ -493,6 +498,11 @@ test('emits page image urls instead of base64 when imageMode is url', () => {
   assert.equal(result.stats.imageBytes, 0);
   assert.ok(!chapter.content.includes('data:image'), '章节里没有 base64');
   assert.match(chapter.content, /<img src="\/pdf-page\?id=5&page=1&name=Im1"/);
+  assert.match(
+    chapter.content,
+    /<img src="\/pdf-page\?id=5&page=1&name=Im1" alt="" width="100%" height="100%" style="display:block">/,
+    'URL 模式同样是固定格式'
+  );
   assert.equal(chapter.images[0].url, '/pdf-page?id=5&page=1&name=Im1');
   assert.equal(chapter.images[0].page, 1);
   assert.equal(chapter.images[0].mediaType, 'image/jpeg', '不解码也能给出 mime');

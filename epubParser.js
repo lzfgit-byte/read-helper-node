@@ -789,6 +789,24 @@ function unwrapImageWrappers(html) {
   return output;
 }
 
+// 读取真正的 src 属性（要求属性名前有空白边界，避免把 data-src 当成 src）
+function readSrcAttribute(rawAttrs) {
+  const match = String(rawAttrs || '').match(/(?:^|\s)src\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
+  if (!match) {
+    return '';
+  }
+  return match[1] !== undefined ? match[1] : match[2];
+}
+
+// 正文图片只定死一种格式：src + alt + width/height + display:block。
+// 其它属性（data-ratio / data-w / data-w-new / class / srcset / data-src …）全部丢弃：
+// 读者端（legado 的 HtmlFormatter.formatKeepImg）只要看到 data-src / data-original
+// 就会改用那个地址、把我们写在 src 里的 base64 丢掉。
+function buildContentImageTag(src) {
+  const safeSrc = String(src == null ? '' : src).replace(/"/g, '&quot;');
+  return `<img src="${safeSrc}" alt="" width="100%" height="100%" style="display:block">`;
+}
+
 // 图片样式合并为块级：保留原有其它声明，只把 display 换成 block
 function mergeBlockStyle(value) {
   const parts = String(value || '')
@@ -800,6 +818,12 @@ function mergeBlockStyle(value) {
 
 function toBlockImageTag(rawAttrs) {
   const attrs = String(rawAttrs || '').trim();
+  // 有 src（base64 或按需地址）就统一成固定格式，顺手丢掉其它所有属性
+  const src = readSrcAttribute(attrs);
+  if (src) {
+    return buildContentImageTag(src);
+  }
+  // 没取到图片（书里没这个资源）：保持原样，只补块级样式
   const styleMatch = attrs.match(/\sstyle\s*=\s*("([^"]*)"|'([^']*)')/i);
   if (styleMatch) {
     const value = styleMatch[2] !== undefined ? styleMatch[2] : styleMatch[3];
@@ -1082,7 +1106,7 @@ function inlineResources(documentHtml, baseDir, loader, options, images) {
   }
 
   // 2. 仅包含一张图片的 <svg> 包裹，直接替换为 <img> 以简化前端渲染
-  output = inlineImages ? output.replace(/<svg\b([^>]*)>([\s\S]*?)<\/svg>/gi, (whole, svgAttrs, inner) => {
+  output = inlineImages ? output.replace(/<svg\b([^>]*)>([\s\S]*?)<\/svg>/gi, (whole, _svgAttrs, inner) => {
     const imageTag = inner.match(/<image\b([^>]*?)\/?>/i);
     if (!imageTag) {
       return whole;
@@ -1093,13 +1117,7 @@ function inlineResources(documentHtml, baseDir, loader, options, images) {
     if (!resource) {
       return whole;
     }
-    const svgParsed = parseAttributes(svgAttrs);
-    const size = [
-      svgParsed.width ? `width="${svgParsed.width}"` : '',
-      svgParsed.height ? `height="${svgParsed.height}"` : ''
-    ].filter(Boolean).join(' ');
-    const alt = imageAttrs.alt ? ` alt="${imageAttrs.alt}"` : ' alt=""';
-    return `<img src="${resource.src}"${alt}${size ? ` ${size}` : ''} />`;
+    return buildContentImageTag(resource.src);
   }) : output;
 
   // 3. <img> 与 SVG <image> 的资源地址改为 base64（或按需地址）
@@ -1107,27 +1125,21 @@ function inlineResources(documentHtml, baseDir, loader, options, images) {
     output = output.replace(/<(img|image)\b([^>]*?)\/?>/gi, (whole, tagName, rawAttrs) => {
       const attrs = parseAttributes(rawAttrs);
       const href = pickImageHref(attrs);
-      if (!href || /^(data:|https?:|blob:)/i.test(href)) {
+      const isImgTag = tagName.toLowerCase() !== 'image';
+      // 已经是 data:/http(s)/blob: 的地址不需要从书里取资源
+      const localHref = /^(data:|https?:|blob:)/i.test(href) ? '' : href;
+      const resource = localHref ? loader.loadImage(localHref, baseDir, images, { from: tagName.toLowerCase() }) : null;
+      if (resource) {
+        return buildContentImageTag(resource.src);
+      }
+      // SVG <image> 取不到资源时保持原样
+      if (!isImgTag) {
         return whole;
       }
-      const resource = loader.loadImage(href, baseDir, images, { from: tagName.toLowerCase() });
-      if (!resource) {
-        return whole;
-      }
-      if (tagName.toLowerCase() === 'image') {
-        const alt = attrs.alt ? ` alt="${attrs.alt}"` : ' alt=""';
-        return `<img src="${resource.src}"${alt} />`;
-      }
-      // 只替换真正的 src 属性：不要把 data-src / srcset 里的 "src=" 也当成目标
-      const replaced = whole.replace(/(\s)src\s*=\s*("([^"]*)"|'([^']*)')/i, (match, space) => `${space}src="${resource.src}"`);
-      if (replaced !== whole) {
-        // 已经换成可显示的地址，去掉懒加载候选属性，避免别的阅读器又去取那个取不到的地址
-        return stripLazyImageAttributes(replaced);
-      }
-      // 只有 data-src（懒加载占位）时补一个 src，保证阅读器能显示
-      return stripLazyImageAttributes(
-        whole.replace(/^<img\b/i, (match) => `${match} src="${resource.src}"`)
-      );
+      // 取不到本地资源（外链图片 / 书里没有这个文件）：保留原 src（按需地址或外链），
+      // 只输出固定格式，把 data-src / data-original / srcset 这类候选属性一并丢掉
+      const fallbackSrc = readSrcAttribute(rawAttrs);
+      return fallbackSrc ? buildContentImageTag(fallbackSrc) : stripLazyImageAttributes(whole);
     });
   }
 

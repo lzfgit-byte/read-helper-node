@@ -40,7 +40,7 @@ Electron 应用，支持：
 - 选择 `.epub` 文件后上传，自动读取书名、作者、简介与封面
 - 按 `spine` 顺序输出章节，章节标题优先取 `<h1>~<h6>`，其次取 NCX/Nav 目录标题
 - **标题被拆到不同 xhtml 时自动合并**：某章没有正文（空内容或只有标题）、下一章有正文，且两个标题合起来仍符合章节规则时，合并为一个目录（如「第十二章」+「风起云涌」→「第十二章 风起云涌」，正文跟在合并后的目录后）。判断逻辑与 TXT 章节解析完全共用（`parseRules.js` 的 `mergeChapterTitles`），服务端会把当前章节规则传进来；插图页（只含 `<img>`）和下一章本身是完整「第X章」标题的情况不合并，合并后的章节会带 `sourceHrefs` 便于排查
-- 章节内的图片（`<img>`、SVG `<image>`、CSS `url(...)`）默认转成可加载的地址嵌在返回的 HTML 中：HTTP 接口给**绝对 URL**（见下节，legado 的 Coil3 加载不了 `data:` 与相对地址），IPC/Electron 预览给 `data:<mime>;base64,...`
+- 章节内的图片（`<img>`、SVG `<image>`、CSS `url(...)`）默认转成 `data:<mime>;base64,...` 嵌在返回的 HTML 中（HTTP 与 IPC 都是，见「正文图片地址」一节；想要绝对地址传 `imageMode: 'url'` / `?images=url`）
   - **默认不设总量上限**：一本 340 张图的 85 MB 书若选 base64 会内嵌约 72 MB（图片只做 base64，不做压缩转换）
   - **整本一次性解析不会爆内存**：`/content` 只解析请求的那一章（`/bookinfo` 的链接带 `&index=`，解析时只给这一章生成图片，其余章节只保留结构）
   - 单张图片上限 8 MB（`maxImageBytes`），更大的单张图会跳过并计入 `skippedImages`；`maxInlineImageBytes` 给正数时才启用整本总量预算（超限的图片会改用按需地址或跳过）
@@ -48,12 +48,18 @@ Electron 应用，支持：
   - 图片地址可选：`imageMode: 'url'`（默认给绝对地址）、`'inline'`（base64）、`'none'`；未保存的解析（没有书籍 id）会退到 `ebook-assets` 磁盘缓存，返回 `/ebook-assets/<sha1>.<ext>` 的绝对地址
   - 统计在 `stats` 里：`imageMode`（`inline`/`url`/`none`）、`imageCount`（引用张数）、`inlinedImages`（base64 张数）、`imageBytes`、`skippedImages`（改用按需或跳过）
 - **正文图片直接内联展示**：多看书系等 EPUB 会把插图/注号图包成 `<sup><a href="..."><img/></a></sup>`，解析时会把这类「只包图片」的 `sup`/`sub`/`a` 包裹层去掉，只保留 `<img>` 本身（带文字的正常链接不动）；可用 `unwrapImages: false` 关闭
-- **懒加载图片（微信读书等导出）**：`<img data-src="..." src="占位/相对路径">` 这类写法里，base64 只会写进真正的 `src`（不再误改 `data-src`）；`src` 是空值或 1×1 占位图时会改用 `data-src` / `data-original` 等属性指向的书内图片，保证阅读器上真得能显示出图
+- **懒加载图片（微信读书等导出）**：`<img data-src="..." src="占位/相对路径">` 这类写法里，base64 写进真正的 `src`；`src` 是空值或 1×1 占位图时会改用 `data-src` / `data-original` 等属性指向的书内图片。这些懒加载候选属性（含 `srcset`）**在所有情况下都会被清掉**（输出就是上面的固定格式）——legado 的 `HtmlFormatter.formatKeepImg()` 只要发现有 `data-src` / `data-original` 就只认它，`src` 里放什么都不管
 - **封面不内嵌 base64，一律以 URL 形式提供**：
   - 仅解析（未保存）时封面写入缓存目录，返回 `http://localhost:3000/epub-covers/<sha1>.<ext>`
   - 保存为书籍后 `coverImg` 为 `/book-cover?id=<书籍id>`，由接口从 EPUB 文件中实时提取（内存缓存，取图无需重复解析）
   - 书籍编辑时封面留空会沿用自动封面地址，不会被清空
-- **正文图片统一块级展示**：每个 `<img>` 都会合并为 `style="display:block"`（保留原有其它样式声明），并在前后补 `<br/>` 分隔；图片旁已有的 `<br/>` 不会重复叠加，可用 `blockImages: false` 关闭
+- **正文图片统一成固定格式**：所有正文图片只输出下面这一种写法（不管是 base64、按需 URL，还是书里原本的外链），`data-ratio` / `data-w` / `data-w-new` / `class` / `srcset` / `data-src` 等属性一律丢弃：
+
+  ```html
+  <img src="data:image/jpeg;base64,..." alt="" width="100%" height="100%" style="display:block">
+  ```
+
+  图片前后会各补一个 `<br/>` 分隔（旁边已有的 `<br/>` 不会重复叠加），可用 `blockImages: false` 只关掉这两个 `<br/>`（标签格式仍固定）
 - **章节注释统一挪到章节末尾**：本章内的注释块（多看/掌阅风格的隐藏 `div`、EPUB3 `aside`/`epub:type="footnote"`）与指向其它 xhtml 的注释链接（`<a href="notes.xhtml#fn1">`）都会被收集，从正文原位移除后追加到章节末尾，编号按注释标记在正文中的出现顺序排列：
 
   ```
@@ -168,7 +174,26 @@ Electron 应用，支持：
 | IPC / Electron 界面预览 | **base64 内嵌** | Chromium 支持 `data:` |
 | 可选 | `imageMode: 'url'` | 发 `http://<请求 Host>/epub-image?id=..&href=..` 绝对地址，图片按需从书籍里取（LRU 缓存） |
 
-图片标签里的 `data-src` / `data-original` / `data-lazy-src` / `data-url` / `srcset` 在换地址时会一并清掉：legado 的 `AnalyzeUrlCore` 对**非 data:** 的 src 会按书籍地址拼绝对地址，留着这些"候选"反而容易被拼成拿不到的 404 地址。
+图片标签里的 `data-src` / `data-original` / `data-lazy-src` / `data-echo` / `data-url` / `srcset` **一律清掉**（不管这张图有没有取到、有没有换成 base64），因为 legado 的正文处理器 `HtmlFormatter.formatKeepImg()`（`foundation/src/commonMain/.../HtmlFormatter.kt`，网络书在 `BookContent.kt` 里调用）对 `img` 是这么取地址的：
+
+```kotlin
+val src = when {
+    node.hasAttr("data-src")      -> node.absUrl("data-src").ifEmpty { node.attr("data-src") }
+    node.hasAttr("data-original") -> node.absUrl("data-original").ifEmpty { node.attr("data-original") }
+    else                          -> node.absUrl("src").ifEmpty { node.attr("src") }
+}
+str.append("<img src=\"$src\"")   // 其它属性全丢
+```
+
+也就是说：**只要标签里还有 `data-src`，legado 就只用 `data-src`，把我们在 `src` 里放的 base64 直接扔掉**（微信读书导出的 `<img data-src="https://res.weread.qq.com/…" src="…">` 正是这种情况，图片会变成破图）。所以这两个属性必须清掉，`src` 才是唯一生效的地址。
+
+因此正文图片一律重建成固定格式（EPUB 与 PDF 都是），原有的其它属性全部丢弃：
+
+```html
+<img src="data:image/jpeg;base64,..." alt="" width="100%" height="100%" style="display:block">
+```
+
+`buildContentImageTag()`（`epubParser.js` / `pdfParser.js`）是唯一的出口，`blockImages` 只控制前后的 `<br/>`，不影响标签格式。
 
 ## 测试
 
