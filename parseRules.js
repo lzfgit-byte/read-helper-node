@@ -306,6 +306,83 @@ function matchesDirectoryEntry(line, directoryEntries) {
   });
 }
 
+// 标题是否带“第X章/回/节”这类章节标记（不依赖 chapterPrefix 是否配置）
+function containsChapterMarker(line, rules) {
+  const prefix = (rules.chapterPrefix || '').trim() || '第';
+  const keywords = Array.isArray(rules.chapterKeywords) ? rules.chapterKeywords : [];
+  const regex = getTitleMarkerRegex(prefix, keywords, true);
+  return regex ? regex.test(String(line || '')) : false;
+}
+
+// 无正文的目录：内容为空，或解析时用标题充当的占位正文
+function isTitleOnlyChapter(chapter) {
+  const content = String(chapter.content || '').trim();
+  if (!content) {
+    return true;
+  }
+  return content === String(chapter.title || '').trim();
+}
+
+// 句中标点：出现这些符号的通常是被误判成标题的正文句子，不参与合并
+const SENTENCE_PUNCTUATION_PATTERN = /[。！？；，、]/;
+
+// 合并后的标题：优先与已配置的目录项写法一致，其次取仍符合标题规则的写法
+function buildMergedTitle(title1, title2, rules, directoryEntries) {
+  const candidates = [`${title1} ${title2}`, `${title1}${title2}`]
+    .map((candidate) => normalizeTitleText(candidate))
+    .filter(Boolean);
+  // 任一截都不是标题样子（含句子标点）时直接不合并
+  if (candidates.some((candidate) => SENTENCE_PUNCTUATION_PATTERN.test(candidate))) {
+    return '';
+  }
+  const exactEntry = candidates.find((candidate) =>
+    directoryEntries.some((entry) => normalizeForMatch(entry) === normalizeForMatch(candidate)));
+  if (exactEntry) {
+    return exactEntry;
+  }
+  // 合并后的标题必须仍符合标题规则，否则不合并
+  return candidates.find((candidate) => isIsTitle(candidate, rules)) || '';
+}
+
+/**
+ * 判断两个目录（标题）能否合并成一个，用于标题被拆行/拆文件的场景。
+ * 返回合并后的标题；不能合并时返回空字符串。
+ */
+function mergeChapterTitles(title1, title2, rules, directoryEntries = []) {
+  if (!title1 || !title2) {
+    return '';
+  }
+  // 下一个标题本身就是完整的“第X章”标题时，说明它是独立章节，不合并
+  if (containsChapterMarker(title2, rules)) {
+    return '';
+  }
+  return buildMergedTitle(title1, title2, rules, directoryEntries);
+}
+
+// 标题被拆成多行时（如“第十二章”+“风起云涌”），把无正文的目录与下一个有正文的目录合并，
+// 正文跟在这个目录之后；合并后的标题仍需符合标题规则。
+function mergeTitleOnlyChapters(chapters, rules, directoryEntries) {
+  const merged = [];
+  for (const chapter of chapters) {
+    let current = chapter;
+    while (merged.length > 0) {
+      const previous = merged[merged.length - 1];
+      // 只处理“上一个目录没有正文 + 当前目录有正文”的情况
+      if (!isTitleOnlyChapter(previous) || isTitleOnlyChapter(current)) {
+        break;
+      }
+      const mergedTitle = mergeChapterTitles(previous.title, current.title, rules, directoryEntries);
+      if (!mergedTitle) {
+        break;
+      }
+      merged.pop();
+      current = { title: mergedTitle, content: current.content };
+    }
+    merged.push(current);
+  }
+  return merged;
+}
+
 function parseTextToChapters(text, rules = {}, directoryEntries = []) {
   const lines = (text == null ? '' : String(text)).split(/\r?\n/);
   const chapters = [];
@@ -345,7 +422,7 @@ function parseTextToChapters(text, rules = {}, directoryEntries = []) {
   if (content || title) {
     flushChapter(chapters, title, content);
   }
-  return chapters;
+  return mergeTitleOnlyChapters(chapters, rules, normalizedDirectoryEntries);
 }
 
-module.exports = { getDefaultRules, loadRules, saveRules, parseTextToChapters, normalizeDirectoryEntries, matchesDirectoryEntry };
+module.exports = { getDefaultRules, loadRules, saveRules, parseTextToChapters, normalizeDirectoryEntries, matchesDirectoryEntry, mergeChapterTitles };

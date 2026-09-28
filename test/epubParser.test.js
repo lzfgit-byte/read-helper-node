@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const zlib = require('zlib');
 const { parseEpubBuffer } = require('../epubParser');
+const { getDefaultRules } = require('../parseRules');
 
 // --- 极简 ZIP 打包（仅测试用），支持 store 与 deflate 两种方式 ---
 const CRC_TABLE = (() => {
@@ -493,6 +494,84 @@ test('keeps notes in place when notesToEnd is disabled', () => {
 
   assert.ok(content.includes('duokan-footnote-content'), '关闭后注释块应保留在原位');
   assert.ok(!content.includes('【本章注释】'));
+});
+
+test('merges a title-only epub chapter with the next chapter', () => {
+  const files = [
+    { name: 'mimetype', data: 'application/epub+zip' },
+    { name: 'META-INF/container.xml', data: CONTAINER_XML },
+    { name: 'OEBPS/content.opf', data: OPF_XML },
+    { name: 'OEBPS/images/pic.png', data: PNG_BUFFER },
+    {
+      name: 'OEBPS/chapter1.xhtml',
+      data: '<?xml version="1.0" encoding="UTF-8"?><html xmlns="http://www.w3.org/1999/xhtml"><body><h1>第十二章</h1></body></html>',
+      compress: true
+    },
+    {
+      name: 'OEBPS/chapter2.xhtml',
+      data: '<?xml version="1.0" encoding="UTF-8"?><html xmlns="http://www.w3.org/1999/xhtml"><body><h1>风起云涌</h1><p>少年背着行囊出了门。</p></body></html>',
+      compress: true
+    }
+  ];
+  const result = parseEpubBuffer(createZip(files), { rules: getDefaultRules() });
+
+  assert.equal(result.chapters.length, 1);
+  assert.equal(result.chapters[0].title, '第十二章 风起云涌');
+  assert.ok(result.chapters[0].content.includes('少年背着行囊出了门'));
+  assert.ok(result.chapters[0].content.includes('风起云涌'));
+  assert.equal(result.chapters[0].index, 1);
+  assert.deepEqual(result.chapters[0].sourceHrefs, ['OEBPS/chapter1.xhtml', 'OEBPS/chapter2.xhtml']);
+  assert.equal(result.stats.chapterCount, 1);
+});
+
+test('keeps epub chapters separate when the next title is complete', () => {
+  const files = [
+    { name: 'mimetype', data: 'application/epub+zip' },
+    { name: 'META-INF/container.xml', data: CONTAINER_XML },
+    { name: 'OEBPS/content.opf', data: OPF_XML },
+    { name: 'OEBPS/images/pic.png', data: PNG_BUFFER },
+    {
+      name: 'OEBPS/chapter1.xhtml',
+      data: '<?xml version="1.0" encoding="UTF-8"?><html xmlns="http://www.w3.org/1999/xhtml"><body><h1>序章</h1></body></html>',
+      compress: true
+    },
+    {
+      name: 'OEBPS/chapter2.xhtml',
+      // 下一章本身已是完整的“第X章”标题，视为独立章节，不合并
+      data: '<?xml version="1.0" encoding="UTF-8"?><html xmlns="http://www.w3.org/1999/xhtml"><body><h1>第一章 出发</h1><p>正文。</p></body></html>',
+      compress: true
+    }
+  ];
+  const result = parseEpubBuffer(createZip(files), { rules: getDefaultRules() });
+
+  assert.equal(result.chapters.length, 2);
+  assert.equal(result.chapters[0].title, '序章');
+  assert.equal(result.chapters[1].title, '第一章 出发');
+  assert.equal(result.chapters[1].index, 2);
+});
+
+test('keeps image-only epub chapters out of the merge', () => {
+  const files = [
+    { name: 'mimetype', data: 'application/epub+zip' },
+    { name: 'META-INF/container.xml', data: CONTAINER_XML },
+    { name: 'OEBPS/content.opf', data: OPF_XML },
+    { name: 'OEBPS/images/pic.png', data: PNG_BUFFER },
+    {
+      name: 'OEBPS/chapter1.xhtml',
+      data: '<?xml version="1.0" encoding="UTF-8"?><html xmlns="http://www.w3.org/1999/xhtml"><body><img src="images/pic.png"/></body></html>',
+      compress: true
+    },
+    {
+      name: 'OEBPS/chapter2.xhtml',
+      data: '<?xml version="1.0" encoding="UTF-8"?><html xmlns="http://www.w3.org/1999/xhtml"><body><h1>风起云涌</h1><p>正文。</p></body></html>',
+      compress: true
+    }
+  ];
+  const result = parseEpubBuffer(createZip(files), { rules: getDefaultRules() });
+
+  assert.equal(result.chapters.length, 2, '插图页应保留为独立章节');
+  assert.ok(result.chapters[0].content.includes('data:image/png;base64,'));
+  assert.equal(result.chapters[1].title, '风起云涌');
 });
 
 test('throws on a file that is not a zip', () => {

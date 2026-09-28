@@ -129,13 +129,13 @@ function extractEpubCover(book) {
 }
 
 // 上传 EPUB 时自动补全书名/作者/简介/目录项，并标记是否包含封面
-function enrichBookFromEpub(sourcePath, payload = {}) {
+function enrichBookFromEpub(sourcePath, payload = {}, rules) {
   if (path.extname(String(sourcePath || '')).toLowerCase() !== EPUB_EXTENSION) {
     return payload;
   }
   let parsed = null;
   try {
-    parsed = parseEpubBuffer(fs.readFileSync(sourcePath), { includeText: false });
+    parsed = parseEpubBuffer(fs.readFileSync(sourcePath), { includeText: false, rules });
   } catch (error) {
     console.warn(`[epub] 元数据解析失败 ${sourcePath}：${error.message}`);
     return payload;
@@ -174,7 +174,11 @@ function resolveUpdatedCover(book, incomingCoverImg) {
 // 按书籍类型选择解析方式：EPUB 走 epubParser，TXT 走章节规则解析
 function loadBookChapters(book, rules, directoryEntries) {
   if (isEpubBook(book)) {
-    const parsed = parseEpubBuffer(fs.readFileSync(book.storedPath), { inlineImages: true });
+    const parsed = parseEpubBuffer(fs.readFileSync(book.storedPath), {
+      inlineImages: true,
+      rules,
+      directoryEntries
+    });
     return {
       chapters: parsed.chapters.map((chapter) => ({ title: chapter.title, content: chapter.content })),
       // 封面以 URL 提供（书籍已保存，走 /book-cover）
@@ -388,7 +392,7 @@ function startStaticServer(openBrowser = false) {
       return res.status(400).json({ message: 'EPUB 文件不能为空' });
     }
     try {
-      const parsed = parseEpubBuffer(file.buffer, readEpubOptions(req.body));
+      const parsed = parseEpubBuffer(file.buffer, { ...readEpubOptions(req.body), rules: await loadRules(rulesPath) });
       return res.json({
         message: '解析成功',
         fileName: file.originalname,
@@ -413,8 +417,9 @@ function startStaticServer(openBrowser = false) {
       return res.status(400).json({ message: 'EPUB 文件不能为空' });
     }
     let parsed = null;
+    const epubRules = await loadRules(rulesPath);
     try {
-      parsed = parseEpubBuffer(file.buffer, readEpubOptions(req.body));
+      parsed = parseEpubBuffer(file.buffer, { ...readEpubOptions(req.body), rules: epubRules });
     } catch (error) {
       console.warn(`[epub] 解析失败 ${file.originalname}：${error.message}`);
     }
@@ -464,7 +469,7 @@ function startStaticServer(openBrowser = false) {
       description: desc,
       coverImg,
       directoryEntries
-    });
+    }, await loadRules(rulesPath));
     const extension = path.extname(file.originalname || '');
     const fallbackTitle = path.basename(file.originalname || 'book', extension);
     const title = (enriched.title || fallbackTitle).trim();
@@ -1081,7 +1086,7 @@ ipcMain.handle('upload-book', async (_, payload) => {
     description,
     coverImg,
     directoryEntries
-  });
+  }, await loadRules(rulesPath));
   const storedPath = saveBookFile(filePath, booksDir, enriched.title, path.extname(filePath));
   const stats = fs.statSync(storedPath);
   const isEpub = path.extname(storedPath).toLowerCase() === EPUB_EXTENSION;
@@ -1109,7 +1114,17 @@ ipcMain.handle('parse-epub-file', async (_, payload = {}) => {
     throw new Error('未找到 EPUB 文件');
   }
   const buffer = fs.readFileSync(filePath);
-  const parsed = parseEpubBuffer(buffer, { inlineImages, inlineStyles, includeText, unwrapImages, blockImages, notesToEnd, notesTitle, maxChapters });
+  const parsed = parseEpubBuffer(buffer, {
+    inlineImages,
+    inlineStyles,
+    includeText,
+    unwrapImages,
+    blockImages,
+    notesToEnd,
+    notesTitle,
+    maxChapters,
+    rules: await loadRules(rulesPath)
+  });
   return {
     ...parsed,
     fileName: path.basename(filePath),
@@ -1128,7 +1143,7 @@ ipcMain.handle('upload-epub-book', async (_, payload = {}) => {
   let parsed = null;
   try {
     // 仅取元数据与章节目录，不需要内嵌图片，避免大文件反复转 base64
-    parsed = parseEpubBuffer(buffer, { includeText: false });
+    parsed = parseEpubBuffer(buffer, { includeText: false, rules: await loadRules(rulesPath) });
   } catch (error) {
     console.warn(`[epub] 元数据解析失败 ${filePath}：${error.message}`);
   }

@@ -164,6 +164,45 @@ test('directory entry matching requires significant overlap', () => {
   assert.equal(matchesDirectoryEntry('背面的颜骨小楷，写的是一段铭文：', entries), false);
 });
 
+test('merges a title-only chapter with the next chapter when the split title stays valid', () => {
+  const text = ['第一章', '风起云涌', '', '少年背着行囊出了门。', '第二章 抵达', '', '他到了。'].join('\n');
+  const rules = getDefaultRules();
+  const directoryEntries = ['第一章 风起云涌', '第二章 抵达'];
+
+  const chapters = parseTextToChapters(text, rules, directoryEntries);
+
+  assert.equal(chapters.length, 2);
+  assert.equal(chapters[0].title, '第一章 风起云涌');
+  assert.ok(chapters[0].content.includes('少年背着行囊'));
+  assert.equal(chapters[1].title, '第二章 抵达');
+  assert.ok(chapters[1].content.includes('他到了'));
+});
+
+test('keeps split titles separate when the merged title breaks the title rules', () => {
+  const text = ['第一章', '风起云涌时', '', '正文内容。'].join('\n');
+  const rules = { ...getDefaultRules(), maxTitleLength: 8 };
+  const directoryEntries = ['第一章', '风起云涌时'];
+
+  const chapters = parseTextToChapters(text, rules, directoryEntries);
+
+  assert.equal(chapters.length, 2);
+  assert.equal(chapters[0].title, '第一章');
+  assert.equal(chapters[1].title, '风起云涌时');
+  assert.ok(chapters[1].content.includes('正文内容'));
+});
+
+test('does not merge when the next title is already a complete chapter title', () => {
+  const text = ['序章', '第一章 出发', '', '正文内容。'].join('\n');
+  const rules = getDefaultRules();
+  const directoryEntries = ['序章', '第一章 出发'];
+
+  const chapters = parseTextToChapters(text, rules, directoryEntries);
+
+  assert.equal(chapters.length, 2);
+  assert.equal(chapters[0].title, '序章');
+  assert.equal(chapters[1].title, '第一章 出发');
+});
+
 test('saveRules normalizes invalid rule values', () => {
   const rulesPath = path.join(os.tmpdir(), `parse-rules-${process.pid}-${Date.now()}.json`);
   try {

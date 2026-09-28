@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
+const { getDefaultRules, mergeChapterTitles } = require('./parseRules');
 
 // ---------------------------------------------------------------------------
 // 最小 ZIP 读取实现（不依赖第三方库）
@@ -934,6 +935,61 @@ function inlineResources(documentHtml, baseDir, loader, options, images) {
 }
 
 // ---------------------------------------------------------------------------
+// 章节合并：标题被拆到不同 xhtml 时（如“第十二章”一页 + “风起云涌”一页）合为一个目录
+// ---------------------------------------------------------------------------
+
+function normalizeForCompare(value) {
+  return String(value == null ? '' : value).replace(/\s+/g, '').trim();
+}
+
+function chapterTextOf(chapter) {
+  if (typeof chapter.text === 'string') {
+    return chapter.text;
+  }
+  return htmlToText(chapter.content);
+}
+
+// 无正文的章节：没有文本，或只有标题；插图页（含 <img>）视为有内容，不参与合并
+function isTitleOnlyChapter(chapter) {
+  if (/<img\b/i.test(String(chapter.content || ''))) {
+    return false;
+  }
+  const text = normalizeForCompare(chapterTextOf(chapter));
+  if (!text) {
+    return true;
+  }
+  return text === normalizeForCompare(chapter.title);
+}
+
+// 把无正文的章节与下一个有正文的章节合并，正文跟在这个目录之后；
+// 合并后的标题仍需符合章节规则（与 TXT 章节解析同一套判断）。
+function mergeTitleOnlyChapters(chapters, rules, directoryEntries) {
+  const merged = [];
+  for (const chapter of chapters) {
+    let current = chapter;
+    while (merged.length > 0) {
+      const previous = merged[merged.length - 1];
+      // 只处理“上一章没有正文 + 当前章有正文”的情况
+      if (!isTitleOnlyChapter(previous) || isTitleOnlyChapter(current)) {
+        break;
+      }
+      const mergedTitle = mergeChapterTitles(previous.title, current.title, rules, directoryEntries);
+      if (!mergedTitle) {
+        break;
+      }
+      merged.pop();
+      current = {
+        ...current,
+        title: mergedTitle,
+        sourceHrefs: [previous.href, current.href].filter(Boolean)
+      };
+    }
+    merged.push(current);
+  }
+  return merged;
+}
+
+// ---------------------------------------------------------------------------
 // 主入口
 // ---------------------------------------------------------------------------
 
@@ -958,6 +1014,9 @@ function parseEpubBuffer(input, options = {}) {
     blockImages: options.blockImages !== false,
     notesToEnd: options.notesToEnd !== false,
     notesTitle: options.notesTitle,
+    // 章节标题规则（与 TXT 解析共用）用于判断拆开的标题能否合并
+    rules: options.rules && typeof options.rules === 'object' ? options.rules : getDefaultRules(),
+    directoryEntries: Array.isArray(options.directoryEntries) ? options.directoryEntries : [],
     maxChapters: Number.isFinite(options.maxChapters) && options.maxChapters > 0 ? options.maxChapters : Infinity
   };
   const buffer = Buffer.isBuffer(input) ? input : Buffer.from(input);
@@ -1093,6 +1152,14 @@ function parseEpubBuffer(input, options = {}) {
     }
   }
 
+  // 标题被拆到不同 xhtml 时合并为一个目录（正文跟在这个目录后）
+  const mergedChapters = settings.includeChapters
+    ? mergeTitleOnlyChapters(chapters, settings.rules, settings.directoryEntries)
+    : chapters;
+  mergedChapters.forEach((chapter, position) => {
+    chapter.index = position + 1;
+  });
+
   const result = {
     title: metadata.title,
     author: metadata.author,
@@ -1103,12 +1170,12 @@ function parseEpubBuffer(input, options = {}) {
     date: metadata.date,
     cover: coverMeta,
     toc: toc.map((item) => ({ title: item.title, href: joinPath(opfDir, item.href), level: item.level || 0 })),
-    chapters,
+    chapters: mergedChapters,
     images: settings.inlineImages === false ? [] : allImages,
     stats: {
       entries: zip.names().length,
       spineCount: spineRefs.length,
-      chapterCount: chapters.length,
+      chapterCount: mergedChapters.length,
       imageCount: settings.inlineImages === false ? 0 : allImages.length
     }
   };
@@ -1131,5 +1198,6 @@ module.exports = {
   unwrapImageWrappers,
   blockifyContentImages,
   collectChapterNotes,
-  scanElementBlocks
+  scanElementBlocks,
+  mergeTitleOnlyChapters
 };
