@@ -6,14 +6,30 @@ const express = require('express');
 const multer = require('multer');
 const { createDatabase } = require('./db');
 const { parseTextToChapters, normalizeDirectoryEntries, loadRules, saveRules, getDefaultRules } = require('./parseRules');
-const { ensureDir, saveBookFile, readHtmlList } = require('./fileService');
+const { parseEpubBuffer } = require('./epubParser');
+const { ensureDir, saveBookFile, saveBookBuffer, readHtmlList } = require('./fileService');
 
 const appDataDir = path.join(app.getPath('userData'), 'reader-helper');
 const booksDir = path.join(appDataDir, 'books');
+const coversDir = path.join(appDataDir, 'epub-covers');
 const javaHtmlDir = path.join('d:', 'projects', 'reader-help', 'src', 'main', 'resources', 'templates');
 const htmlDir = fs.existsSync(javaHtmlDir) ? javaHtmlDir : path.join(__dirname, 'public', 'html');
 const dbPath = path.join(appDataDir, 'reader-helper.db');
 const rulesPath = path.join(appDataDir, 'parse-rules.json');
+const EPUB_EXTENSION = '.epub';
+// 已保存书籍的封面由该接口从 EPUB 文件里实时提取
+const BOOK_COVER_PATH = '/book-cover';
+// 仅解析（未保存）时，封面先落到缓存目录再通过静态地址提供
+const EPUB_COVER_CACHE_PATH = '/epub-covers';
+const COVER_EXTENSIONS = {
+  'image/jpeg': '.jpg',
+  'image/png': '.png',
+  'image/gif': '.gif',
+  'image/webp': '.webp',
+  'image/bmp': '.bmp',
+  'image/svg+xml': '.svg',
+  'image/avif': '.avif'
+};
 let serverInstance = null;
 let serverPort = 3000;
 let mainWindow;
@@ -21,6 +37,152 @@ let database;
 
 function splitDirectoryEntries(directoryEntries) {
   return normalizeDirectoryEntries(directoryEntries);
+}
+
+function isEpubBook(book) {
+  const fileType = String((book && book.fileType) || '').toLowerCase();
+  const storedPath = String((book && book.storedPath) || '').toLowerCase();
+  return fileType === 'epub' || storedPath.endsWith(EPUB_EXTENSION);
+}
+
+// EPUB 解析结果 -> 前端表单/展示用的书本信息（封面以 URL 形式给出，不内嵌 base64）
+function buildEpubSummary(parsed, coverUrl = '') {
+  const cover = parsed.cover || null;
+  return {
+    title: parsed.title || '',
+    author: parsed.author || '',
+    description: parsed.description || '',
+    language: parsed.language || '',
+    identifier: parsed.identifier || '',
+    publisher: parsed.publisher || '',
+    date: parsed.date || '',
+    coverImg: cover ? coverUrl : '',
+    coverMediaType: cover ? cover.mediaType : '',
+    coverBytes: cover ? cover.bytes : 0,
+    toc: parsed.toc || [],
+    chapterCount: parsed.chapters.length,
+    imageCount: parsed.stats ? parsed.stats.imageCount : 0
+  };
+}
+
+// 章节标题默认作为目录项保存，方便后续检索
+function epubDirectoryEntries(parsed) {
+  const titles = (parsed.chapters || []).map((chapter) => chapter.title).filter(Boolean);
+  return titles.join('\n');
+}
+
+// 已保存书籍的封面地址（相对路径，由 /book-cover 从 EPUB 文件里提取）
+function epubCoverUrl(bookId) {
+  return `${BOOK_COVER_PATH}?id=${bookId}`;
+}
+
+// 未保存的 EPUB：封面写入缓存目录，返回可直接访问的静态地址
+function cacheEpubCover(parsed, options = {}) {
+  if (!parsed || !parsed.cover || !parsed.coverData) {
+    return '';
+  }
+  ensureDir(coversDir);
+  const extension = COVER_EXTENSIONS[parsed.cover.mediaType] || path.extname(parsed.cover.href) || '.img';
+  const hash = crypto.createHash('sha1').update(parsed.coverData).digest('hex');
+  const fileName = `${hash}${extension}`;
+  const destPath = path.join(coversDir, fileName);
+  if (!fs.existsSync(destPath)) {
+    fs.writeFileSync(destPath, parsed.coverData);
+  }
+  const coverPath = `${EPUB_COVER_CACHE_PATH}/${encodeURIComponent(fileName)}`;
+  return options.absolute ? `http://localhost:${serverPort}${coverPath}` : coverPath;
+}
+
+// 已保存 EPUB 书籍的封面：解析一次后缓存在内存里
+const epubCoverCache = new Map();
+const EPUB_COVER_CACHE_LIMIT = 50;
+
+function extractEpubCover(book) {
+  if (!book || !book.storedPath || !fs.existsSync(book.storedPath)) {
+    return null;
+  }
+  const stats = fs.statSync(book.storedPath);
+  const key = `${book.storedPath}|${stats.mtimeMs}`;
+  if (epubCoverCache.has(key)) {
+    return epubCoverCache.get(key);
+  }
+  let cover = null;
+  try {
+    const parsed = parseEpubBuffer(fs.readFileSync(book.storedPath), {
+      inlineImages: false,
+      inlineStyles: false,
+      includeText: false,
+      includeChapters: false
+    });
+    cover = parsed.cover && parsed.coverData
+      ? { mediaType: parsed.cover.mediaType, data: parsed.coverData }
+      : null;
+  } catch (error) {
+    console.warn(`[epub] 封面提取失败 ${book.storedPath}：${error.message}`);
+    cover = null;
+  }
+  epubCoverCache.set(key, cover);
+  if (epubCoverCache.size > EPUB_COVER_CACHE_LIMIT) {
+    epubCoverCache.delete(epubCoverCache.keys().next().value);
+  }
+  return cover;
+}
+
+// 上传 EPUB 时自动补全书名/作者/简介/目录项，并标记是否包含封面
+function enrichBookFromEpub(sourcePath, payload = {}) {
+  if (path.extname(String(sourcePath || '')).toLowerCase() !== EPUB_EXTENSION) {
+    return payload;
+  }
+  let parsed = null;
+  try {
+    parsed = parseEpubBuffer(fs.readFileSync(sourcePath), { includeText: false });
+  } catch (error) {
+    console.warn(`[epub] 元数据解析失败 ${sourcePath}：${error.message}`);
+    return payload;
+  }
+  const summary = buildEpubSummary(parsed);
+  return {
+    ...payload,
+    title: payload.title || summary.title,
+    author: payload.author || summary.author,
+    description: payload.description || summary.description,
+    directoryEntries: payload.directoryEntries || epubDirectoryEntries(parsed),
+    epubCoverAvailable: Boolean(parsed.cover)
+  };
+}
+
+// EPUB 书籍的封面统一走 /book-cover，无需把 base64 写进数据库
+function insertBookWithCover(book) {
+  const inserted = database.insertBook(book);
+  if (!inserted.coverImg && isEpubBook(inserted) && book.epubCoverAvailable !== false) {
+    const coverImg = epubCoverUrl(inserted.id);
+    database.updateBookCover(inserted.id, coverImg);
+    return { ...inserted, coverImg };
+  }
+  return inserted;
+}
+
+// 编辑书籍时：EPUB 封面留空表示沿用既有地址，避免误删自动封面
+function resolveUpdatedCover(book, incomingCoverImg) {
+  const value = typeof incomingCoverImg === 'string' ? incomingCoverImg.trim() : '';
+  if (value) {
+    return value;
+  }
+  return isEpubBook(book) ? (book.coverImg || '') : '';
+}
+
+// 按书籍类型选择解析方式：EPUB 走 epubParser，TXT 走章节规则解析
+function loadBookChapters(book, rules, directoryEntries) {
+  if (isEpubBook(book)) {
+    const parsed = parseEpubBuffer(fs.readFileSync(book.storedPath), { inlineImages: true });
+    return {
+      chapters: parsed.chapters.map((chapter) => ({ title: chapter.title, content: chapter.content })),
+      // 封面以 URL 提供（书籍已保存，走 /book-cover）
+      epub: { ...buildEpubSummary(parsed, resolveCoverUrl(book.coverImg)), chapters: parsed.chapters }
+    };
+  }
+  const chapters = parseTextToChapters(fs.readFileSync(book.storedPath, 'utf8'), rules, directoryEntries);
+  return { chapters, epub: null };
 }
 
 function serializeForScript(value) {
@@ -42,7 +204,32 @@ function buildCoverProxyUrl(coverImg, options = {}) {
   return options.absolute ? `http://localhost:${serverPort}${proxyPath}` : proxyPath;
 }
 
-// Returns the book with `coverImg` replaced by the proxied URL and keeps the
+function buildCoverProxyUrl(coverImg, options = {}) {
+  const value = typeof coverImg === 'string' ? coverImg.trim() : '';
+  if (!value || !/^https?:\/\//i.test(value) || value.includes(`${COVER_PROXY_PATH}?url=`)) {
+    return value;
+  }
+  const proxyPath = `${COVER_PROXY_PATH}?url=${encodeURIComponent(value)}`;
+  return options.absolute ? `http://localhost:${serverPort}${proxyPath}` : proxyPath;
+}
+
+// 封面地址统一处理：外部 http 地址走代理，本地接口地址按需补全为绝对地址
+function resolveCoverUrl(coverImg, options = {}) {
+  const value = typeof coverImg === 'string' ? coverImg.trim() : '';
+  if (!value) {
+    return '';
+  }
+  if (/^https?:\/\//i.test(value)) {
+    return buildCoverProxyUrl(value, options);
+  }
+  if (value.startsWith('/')) {
+    return options.absolute ? `http://localhost:${serverPort}${value}` : value;
+  }
+  // data: 等其它形式（历史数据）原样返回
+  return value;
+}
+
+// Returns the book with `coverImg` replaced by the servable URL and keeps the
 // original address in `coverImgSource` so edit forms don't save the proxy back.
 function decorateBookCover(book, options) {
   if (!book) {
@@ -50,7 +237,7 @@ function decorateBookCover(book, options) {
   }
   return {
     ...book,
-    coverImg: buildCoverProxyUrl(book.coverImg, options),
+    coverImg: resolveCoverUrl(book.coverImg, options),
     coverImgSource: book.coverImg || ''
   };
 }
@@ -95,9 +282,38 @@ function startStaticServer(openBrowser = false) {
     return { url: `http://localhost:${serverPort}/`, running: true };
   }
   ensureDir(htmlDir);
+  ensureDir(coversDir);
   const appServer = express();
   appServer.use(express.json());
   appServer.use(express.urlencoded({ extended: true }));
+
+  // 仅解析（尚未保存）的 EPUB 封面缓存目录
+  appServer.use(EPUB_COVER_CACHE_PATH, express.static(coversDir, { index: false, maxAge: '7d' }));
+
+  // 已保存 EPUB 书籍的封面：从 EPUB 文件中提取后按 URL 返回（不内嵌 base64）
+  appServer.get(BOOK_COVER_PATH, async (req, res) => {
+    const bookId = Number(req.query.id);
+    if (!Number.isFinite(bookId)) {
+      return res.status(400).send('id 不能为空');
+    }
+    const book = database.getBookById(bookId);
+    if (!book) {
+      return res.status(404).send('书籍未找到');
+    }
+    if (isEpubBook(book)) {
+      const cover = extractEpubCover(book);
+      if (!cover) {
+        return res.status(404).send('该 EPUB 未包含封面');
+      }
+      res.set('Content-Type', cover.mediaType || 'application/octet-stream');
+      res.set('Cache-Control', 'public, max-age=86400');
+      return res.send(cover.data);
+    }
+    if (/^https?:\/\//i.test(String(book.coverImg || ''))) {
+      return res.redirect(`${COVER_PROXY_PATH}?url=${encodeURIComponent(book.coverImg)}`);
+    }
+    return res.status(404).send('封面未找到');
+  });
 
   // 封面图片代理：由后台请求外部封面地址再返回给前端，规避防盗链导致的封面无法显示。
   // 注册在日志中间件之前，避免把图片二进制写入 API 日志。
@@ -148,30 +364,130 @@ function startStaticServer(openBrowser = false) {
 
   const upload = multer({ dest: path.join(appDataDir, 'temp') });
 
+  // EPUB 直接在内存中解析，避免临时文件清理问题
+  const epubUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 300 * 1024 * 1024 }
+  });
+
+  function readEpubOptions(body = {}) {
+    return {
+      inlineImages: body.inlineImages !== 'false' && body.inlineImages !== false,
+      inlineStyles: body.inlineStyles !== 'false' && body.inlineStyles !== false
+    };
+  }
+
+  // 上传并解析 EPUB，返回章节内容（章节图片已内嵌 base64；封面以 URL 返回）
+  appServer.post('/data-operate/epub/parse', epubUpload.single('file'), async (req, res) => {
+    const file = req.file;
+    if (!file || !file.buffer || file.buffer.length === 0) {
+      return res.status(400).json({ message: 'EPUB 文件不能为空' });
+    }
+    try {
+      const parsed = parseEpubBuffer(file.buffer, readEpubOptions(req.body));
+      return res.json({
+        message: '解析成功',
+        fileName: file.originalname,
+        size: `${Math.round(file.buffer.length / 1024)} KB`,
+        book: buildEpubSummary(parsed, cacheEpubCover(parsed, { absolute: true })),
+        toc: parsed.toc,
+        chapters: parsed.chapters,
+        images: parsed.images,
+        stats: parsed.stats
+      });
+    } catch (error) {
+      console.warn(`[epub] 解析失败 ${file.originalname}：${error.message}`);
+      return res.status(400).json({ message: `EPUB 解析失败：${error.message}` });
+    }
+  });
+
+  // 上传 EPUB、解析元数据并保存为书籍（封面保存为 /book-cover 地址）
+  appServer.post('/data-operate/epub/upload', epubUpload.single('file'), async (req, res) => {
+    const file = req.file;
+    if (!file || !file.buffer || file.buffer.length === 0) {
+      return res.status(400).json({ message: 'EPUB 文件不能为空' });
+    }
+    let parsed = null;
+    try {
+      parsed = parseEpubBuffer(file.buffer, readEpubOptions(req.body));
+    } catch (error) {
+      console.warn(`[epub] 解析失败 ${file.originalname}：${error.message}`);
+    }
+    const fallbackTitle = path.basename(file.originalname || 'book', path.extname(file.originalname || ''));
+    const title = (req.body.bookName || (parsed && parsed.title) || fallbackTitle).trim();
+    const storedPath = saveBookBuffer(file.buffer, booksDir, title, EPUB_EXTENSION);
+    const stats = fs.statSync(storedPath);
+    const book = {
+      title,
+      author: (req.body.authorName || (parsed && parsed.author) || '').trim(),
+      description: (req.body.desc || (parsed && parsed.description) || '').trim(),
+      coverImg: '',
+      sourcePath: file.originalname,
+      storedPath,
+      fileName: path.basename(storedPath),
+      size: `${Math.round(stats.size / 1024)} KB`,
+      fileType: 'epub',
+      directoryEntries: parsed ? epubDirectoryEntries(parsed) : splitDirectoryEntries(req.body.directoryEntries || '').join('\n'),
+      createdAt: new Date().toISOString(),
+      epubCoverAvailable: Boolean(parsed && parsed.cover)
+    };
+    const inserted = insertBookWithCover(book);
+    return res.json({
+      message: 'EPUB 上传成功',
+      book: decorateBookCover(inserted),
+      parsed: parsed
+        ? {
+          meta: buildEpubSummary(parsed, resolveCoverUrl(inserted.coverImg)),
+          chapters: parsed.chapters,
+          images: parsed.images,
+          stats: parsed.stats
+        }
+        : null
+    });
+  });
+
   appServer.post('/data-operate/submitForm', upload.single('file'), async (req, res) => {
     const file = req.file;
     const { bookName, desc, authorName, coverImg, directoryEntries } = req.body;
-    if (!file || !bookName) {
-      return res.status(400).json({ message: '文件或书名不能为空' });
+    if (!file) {
+      return res.status(400).json({ message: '文件不能为空' });
     }
-    const storedPath = saveBookFile(file.path, booksDir, bookName);
+    // EPUB 会先解析出元数据补全表单里留空的字段
+    const enriched = enrichBookFromEpub(file.path, {
+      title: bookName,
+      author: authorName,
+      description: desc,
+      coverImg,
+      directoryEntries
+    });
+    const extension = path.extname(file.originalname || '');
+    const fallbackTitle = path.basename(file.originalname || 'book', extension);
+    const title = (enriched.title || fallbackTitle).trim();
+    const isEpub = extension.toLowerCase() === EPUB_EXTENSION;
+    if (!title) {
+      fs.unlinkSync(file.path);
+      return res.status(400).json({ message: '书名不能为空' });
+    }
+    const storedPath = saveBookFile(file.path, booksDir, title, extension);
     fs.unlinkSync(file.path);
     const stats = fs.statSync(storedPath);
     const book = {
-      title: bookName,
-      author: authorName || '',
-      description: desc || '',
-      coverImg: coverImg || '',
+      title,
+      author: enriched.author || '',
+      description: enriched.description || '',
+      // EPUB 的封面由 /book-cover 提供，这里不再内嵌 base64
+      coverImg: isEpub ? '' : (enriched.coverImg || ''),
       sourcePath: file.originalname,
       storedPath,
       fileName: path.basename(storedPath),
       size: `${Math.round(stats.size / 1024)} KB`,
       fileType: path.extname(storedPath).replace('.', ''),
-      directoryEntries: splitDirectoryEntries(directoryEntries).join('\n'),
-      createdAt: new Date().toISOString()
+      directoryEntries: splitDirectoryEntries(enriched.directoryEntries).join('\n'),
+      createdAt: new Date().toISOString(),
+      epubCoverAvailable: isEpub ? enriched.epubCoverAvailable !== false : undefined
     };
-    database.insertBook(book);
-    return res.json({ message: '提交成功', book });
+    const inserted = insertBookWithCover(book);
+    return res.json({ message: '提交成功', book: decorateBookCover(inserted) });
   });
 
   appServer.get('/data-operate/delete', async (req, res) => {
@@ -204,7 +520,9 @@ function startStaticServer(openBrowser = false) {
       title: title ?? existing.title,
       author: author ?? existing.author ?? '',
       description: description ?? existing.description ?? '',
-      coverImg: coverImg ?? existing.coverImg ?? '',
+      coverImg: coverImg === undefined
+        ? (existing.coverImg || '')
+        : resolveUpdatedCover(existing, coverImg),
       directoryEntries: directoryEntries === undefined
         ? existing.directoryEntries || ''
         : splitDirectoryEntries(directoryEntries).join('\n')
@@ -314,7 +632,10 @@ function startStaticServer(openBrowser = false) {
           <h1>书籍管理</h1>
           <p>通过此页面管理已上传的书籍，并可以打开本地文件夹查看内容。</p>
         </div>
-        <button class="btn btn-primary" onclick="showModal()">新增书籍</button>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;">
+          <a class="btn btn-primary" href="/epub" style="text-decoration:none;">EPUB 解析</a>
+          <button class="btn btn-primary" onclick="showModal()">新增书籍</button>
+        </div>
       </div>
       <div id="message" class="message info"></div>
       <ul id="books" class="book-list">${rows}</ul>
@@ -327,7 +648,7 @@ function startStaticServer(openBrowser = false) {
         </div>
         <form id="uploadForm" method="post" enctype="multipart/form-data" onsubmit="submitForm(event)">
           <div class="modal-body">
-            <div class="field"><label>文件</label><input type="file" name="file" required /></div>
+            <div class="field"><label>文件</label><input type="file" name="file" accept=".txt,.md,.epub" required /></div>
             <div class="field"><label>书名</label><input type="text" name="bookName" required /></div>
             <div class="field"><label>作者</label><input type="text" name="authorName" /></div>
             <div class="field"><label>描述</label><textarea name="desc"></textarea></div>
@@ -483,8 +804,8 @@ function startStaticServer(openBrowser = false) {
     if (!book) {
       return res.status(404).send('书籍未找到');
     }
-    const chapters = parseTextToChapters(
-      fs.readFileSync(book.storedPath, 'utf8'),
+    const { chapters } = loadBookChapters(
+      book,
       await loadRules(rulesPath),
       splitDirectoryEntries(book.directoryEntries)
     );
@@ -513,8 +834,9 @@ function startStaticServer(openBrowser = false) {
     if (!book) {
       return res.status(404).send('书籍未找到');
     }
-    const chapters = parseTextToChapters(
-      fs.readFileSync(book.storedPath, 'utf8'),
+    const isEpub = isEpubBook(book);
+    const { chapters } = loadBookChapters(
+      book,
       await loadRules(rulesPath),
       splitDirectoryEntries(book.directoryEntries)
     );
@@ -522,13 +844,172 @@ function startStaticServer(openBrowser = false) {
     chapters.forEach((chapter, index) => {
       const chunkId = crypto.createHash('md5').update(book.id + '-' + index).digest('hex');
       if (chunkId === id) {
-        chapterContent = chapter.content.replace(/\n/g, '<br/>');
+        // EPUB 章节已是包含 base64 图片的 HTML，直接输出
+        chapterContent = isEpub ? chapter.content : chapter.content.replace(/\n/g, '<br/>');
       }
     });
     if (!chapterContent) {
       return res.status(404).send('章节未找到');
     }
     res.send(`<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"/><title>正文</title></head><body><div id="content">${chapterContent}</div></body></html>`);
+  });
+
+  // 浏览器端 EPUB 上传页：上传后解析并以内嵌 base64 图片的方式展示章节
+  appServer.get('/epub', (req, res) => {
+    const html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"/><title>EPUB 上传解析</title><style>
+      *{box-sizing:border-box;}
+      body{margin:0;font-family:'Segoe UI','Helvetica Neue','PingFang SC','Microsoft YaHei',Arial,sans-serif;background:#f4f7fb;color:#0f172a;}
+      .container{max-width:1000px;margin:0 auto;padding:32px 20px 64px;}
+      h1{font-size:26px;margin:0 0 6px;}
+      .sub{color:#64748b;font-size:14px;margin:0 0 22px;}
+      .card{background:#fff;border:1px solid #e8edf3;border-radius:16px;padding:20px 22px;box-shadow:0 6px 20px rgba(15,23,42,.05);margin-bottom:20px;}
+      .row{display:flex;gap:12px;flex-wrap:wrap;align-items:center;}
+      .field{margin-bottom:14px;}
+      .field label{display:block;font-size:13px;font-weight:600;color:#475569;margin-bottom:6px;}
+      input[type=text],input[type=file]{width:100%;padding:11px 13px;border:1px solid #d1d5db;border-radius:10px;background:#f8fafc;font-size:14px;font-family:inherit;}
+      button{padding:11px 20px;border:none;border-radius:10px;background:linear-gradient(135deg,#3b82f6,#2563eb);color:#fff;font-weight:600;font-size:14px;cursor:pointer;}
+      button.ghost{background:#fff;color:#334155;border:1px solid #e2e8f0;}
+      button:disabled{opacity:.6;cursor:not-allowed;}
+      .hint{font-size:12px;color:#94a3b8;margin-top:8px;}
+      .msg{display:none;padding:12px 16px;border-radius:10px;margin-bottom:16px;font-size:14px;}
+      .msg.info{background:#eff6ff;color:#075985;border:1px solid #bfdbfe;}
+      .msg.error{background:#fef2f2;color:#991b1b;border:1px solid #fecaca;}
+      .meta{display:flex;gap:18px;align-items:flex-start;}
+      .meta img{width:110px;border-radius:10px;border:1px solid #eef2f7;box-shadow:0 8px 20px rgba(15,23,42,.10);}
+      .meta h2{margin:0 0 6px;font-size:20px;}
+      .meta p{margin:0 0 6px;font-size:13px;color:#64748b;line-height:1.7;}
+      .chapter{border:1px solid #e5e7eb;border-radius:10px;margin-bottom:10px;overflow:hidden;}
+      .chapter-head{display:flex;gap:10px;align-items:center;padding:12px 14px;cursor:pointer;user-select:none;}
+      .chapter-head:hover{background:#f8fafc;}
+      .chapter-no{min-width:28px;height:22px;padding:0 6px;border-radius:999px;background:#eff6ff;color:#2563eb;font-size:12px;font-weight:600;display:inline-flex;align-items:center;justify-content:center;}
+      .chapter-title{flex:1;min-width:0;font-size:14px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+      .chapter-toggle{font-size:12px;color:#2563eb;}
+      .chapter-body{display:none;padding:14px 18px;border-top:1px solid #e5e7eb;font-size:14px;line-height:1.9;color:#374151;max-height:520px;overflow:auto;}
+      .chapter-body img{max-width:100%;height:auto;}
+      .chapter.open .chapter-body{display:block;}
+    </style></head><body><div class="container">
+      <h1>EPUB 上传解析</h1>
+      <p class="sub">上传 EPUB 文件后即可解析章节，章节内的图片会以 base64 data URI 内嵌在返回的 HTML 中，封面则通过 URL 提供。</p>
+      <div id="message" class="msg info"></div>
+      <div class="card">
+        <div class="field"><label>EPUB 文件</label><input id="file" type="file" accept=".epub,application/epub+zip" /></div>
+        <div class="row">
+          <div class="field" style="flex:1;min-width:220px;margin-bottom:0;"><label>书名（留空自动读取）</label><input id="bookName" type="text" /></div>
+          <div class="field" style="flex:1;min-width:220px;margin-bottom:0;"><label>作者（留空自动读取）</label><input id="authorName" type="text" /></div>
+        </div>
+        <div class="row" style="margin-top:16px;">
+          <button id="parseBtn">上传并解析</button>
+          <button id="saveBtn" class="ghost">保存为书籍</button>
+        </div>
+        <div class="hint">章节图片已是 base64，封面则通过封面 URL 加载。</div>
+      </div>
+      <div id="result"></div>
+    </div>
+    <script>
+      const message = document.getElementById('message');
+      const fileInput = document.getElementById('file');
+      const result = document.getElementById('result');
+      let currentFile = null;
+      let lastParsed = null;
+      function showMessage(text, type = 'info') {
+        message.textContent = text;
+        message.className = 'msg ' + (type === 'error' ? 'error' : 'info');
+        message.style.display = 'block';
+      }
+      function escapeHtml(value) {
+        return String(value == null ? '' : value)
+          .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+      }
+      function renderParsed(payload) {
+        const book = payload.book || {};
+        const chapters = payload.chapters || [];
+        const stats = payload.stats || {};
+        const parts = ['<div class="card"><div class="meta">'];
+        if (book.coverImg) {
+          parts.push('<img src="' + book.coverImg + '" alt="封面" />');
+        }
+        parts.push('<div><h2>' + escapeHtml(book.title || payload.fileName || '未命名') + '</h2>');
+        parts.push('<p>作者：' + escapeHtml(book.author || '未知') + '　语言：' + escapeHtml(book.language || '-') + '</p>');
+        parts.push('<p>章节：' + chapters.length + '　内嵌图片：' + (stats.imageCount || 0) + '　文件大小：' + escapeHtml(payload.size || '-') + '</p>');
+        if (book.description) {
+          parts.push('<p>' + escapeHtml(book.description) + '</p>');
+        }
+        parts.push('</div></div></div>');
+        parts.push('<div class="card"><h2 style="margin:0 0 14px;font-size:17px;">章节目录</h2>');
+        chapters.forEach((chapter, index) => {
+          parts.push('<div class="chapter" data-index="' + index + '"><div class="chapter-head"><span class="chapter-no">' + (index + 1) + '</span><span class="chapter-title">' + escapeHtml(chapter.title) + '</span><span class="chapter-toggle">展开</span></div><div class="chapter-body"></div></div>');
+        });
+        parts.push('</div>');
+        result.innerHTML = parts.join('');
+        const chapterList = chapters;
+        result.querySelectorAll('.chapter').forEach((element) => {
+          const head = element.querySelector('.chapter-head');
+          const body = element.querySelector('.chapter-body');
+          head.addEventListener('click', () => {
+            const open = element.classList.toggle('open');
+            head.querySelector('.chapter-toggle').textContent = open ? '收起' : '展开';
+            if (open && !body.dataset.loaded) {
+              body.innerHTML = chapterList[Number(element.dataset.index)].content;
+              body.dataset.loaded = '1';
+            }
+          });
+        });
+      }
+      function buildFormData() {
+        const formData = new FormData();
+        formData.append('file', currentFile);
+        formData.append('bookName', document.getElementById('bookName').value.trim());
+        formData.append('authorName', document.getElementById('authorName').value.trim());
+        return formData;
+      }
+      document.getElementById('parseBtn').onclick = async () => {
+        currentFile = fileInput.files && fileInput.files[0];
+        if (!currentFile) {
+          showMessage('请先选择 EPUB 文件', 'error');
+          return;
+        }
+        showMessage('正在解析……');
+        try {
+          const response = await fetch('/data-operate/epub/parse', { method: 'POST', body: buildFormData() });
+          const payload = await response.json();
+          if (!response.ok) {
+            throw new Error(payload.message || '解析失败');
+          }
+          lastParsed = payload;
+          if (!document.getElementById('bookName').value.trim()) {
+            document.getElementById('bookName').value = (payload.book && payload.book.title) || '';
+          }
+          renderParsed(payload);
+          showMessage('解析成功：共 ' + (payload.chapters || []).length + ' 章，章节图片已内嵌为 base64，封面以 URL 返回');
+        } catch (error) {
+          showMessage(error.message || '解析失败', 'error');
+        }
+      };
+      document.getElementById('saveBtn').onclick = async () => {
+        currentFile = fileInput.files && fileInput.files[0];
+        if (!currentFile) {
+          showMessage('请先选择 EPUB 文件', 'error');
+          return;
+        }
+        showMessage('正在保存……');
+        try {
+          const response = await fetch('/data-operate/epub/upload', { method: 'POST', body: buildFormData() });
+          const payload = await response.json();
+          if (!response.ok) {
+            throw new Error(payload.message || '保存失败');
+          }
+          if (payload.parsed) {
+            renderParsed({ book: payload.parsed.meta, chapters: payload.parsed.chapters, stats: payload.parsed.stats, fileName: currentFile.name });
+          }
+          showMessage('已保存书籍：' + (payload.book && payload.book.title));
+        } catch (error) {
+          showMessage(error.message || '保存失败', 'error');
+        }
+      };
+    </script>
+  </body></html>`;
+    res.send(html);
   });
 
   appServer.use('/html', express.static(htmlDir, { index: false }));
@@ -549,6 +1030,7 @@ function startStaticServer(openBrowser = false) {
 app.whenReady().then(async () => {
   ensureDir(appDataDir);
   ensureDir(booksDir);
+  ensureDir(coversDir);
   database = await createDatabase(dbPath);
   loadRules(rulesPath).catch(() => saveRules(rulesPath, getDefaultRules()));
   createWindow();
@@ -570,6 +1052,8 @@ ipcMain.handle('select-txt-file', async () => {
   const result = await dialog.showOpenDialog({
     properties: ['openFile'],
     filters: [
+      { name: '书籍文件（txt/md/epub）', extensions: ['txt', 'md', 'epub'] },
+      { name: 'EPUB 电子书', extensions: ['epub'] },
       { name: '文本文件', extensions: ['txt', 'md'] },
       { name: '所有文件', extensions: ['*'] }
     ]
@@ -585,22 +1069,86 @@ ipcMain.handle('upload-book', async (_, payload) => {
   if (!filePath || !fs.existsSync(filePath)) {
     throw new Error('未找到上传文件');
   }
-  const storedPath = saveBookFile(filePath, booksDir, title);
+  // EPUB 会先解析出元数据补全留空的字段
+  const enriched = enrichBookFromEpub(filePath, {
+    title,
+    author,
+    description,
+    coverImg,
+    directoryEntries
+  });
+  const storedPath = saveBookFile(filePath, booksDir, enriched.title, path.extname(filePath));
   const stats = fs.statSync(storedPath);
+  const isEpub = path.extname(storedPath).toLowerCase() === EPUB_EXTENSION;
   const book = {
-    title: title || path.basename(storedPath, path.extname(storedPath)),
-    author: author || '',
-    description: description || '',
-    coverImg: coverImg || '',
+    title: enriched.title || path.basename(storedPath, path.extname(storedPath)),
+    author: enriched.author || '',
+    description: enriched.description || '',
+    // EPUB 的封面由 /book-cover 提供，不内嵌 base64
+    coverImg: isEpub ? '' : (enriched.coverImg || ''),
     sourcePath: filePath,
     storedPath,
     fileName: path.basename(storedPath),
     size: `${Math.round(stats.size / 1024)} KB`,
     fileType: path.extname(storedPath).replace('.', ''),
-    directoryEntries: splitDirectoryEntries(directoryEntries).join('\n'),
-    createdAt: new Date().toISOString()
+    directoryEntries: splitDirectoryEntries(enriched.directoryEntries).join('\n'),
+    createdAt: new Date().toISOString(),
+    epubCoverAvailable: isEpub ? enriched.epubCoverAvailable !== false : undefined
   };
-  return database.insertBook(book);
+  return insertBookWithCover(book);
+});
+
+ipcMain.handle('parse-epub-file', async (_, payload = {}) => {
+  const { filePath, inlineImages, inlineStyles, includeText, maxChapters } = payload;
+  if (!filePath || !fs.existsSync(filePath)) {
+    throw new Error('未找到 EPUB 文件');
+  }
+  const buffer = fs.readFileSync(filePath);
+  const parsed = parseEpubBuffer(buffer, { inlineImages, inlineStyles, includeText, maxChapters });
+  return {
+    ...parsed,
+    fileName: path.basename(filePath),
+    size: `${Math.round(buffer.length / 1024)} KB`,
+    // 封面以 URL 返回（暂存到封面缓存目录），章节图片仍为 base64
+    book: buildEpubSummary(parsed, cacheEpubCover(parsed, { absolute: true }))
+  };
+});
+
+ipcMain.handle('upload-epub-book', async (_, payload = {}) => {
+  const { filePath, title, author, description, coverImg, directoryEntries } = payload;
+  if (!filePath || !fs.existsSync(filePath)) {
+    throw new Error('未找到 EPUB 文件');
+  }
+  const buffer = fs.readFileSync(filePath);
+  let parsed = null;
+  try {
+    // 仅取元数据与章节目录，不需要内嵌图片，避免大文件反复转 base64
+    parsed = parseEpubBuffer(buffer, { includeText: false });
+  } catch (error) {
+    console.warn(`[epub] 元数据解析失败 ${filePath}：${error.message}`);
+  }
+  const fallbackTitle = path.basename(filePath, path.extname(filePath));
+  const finalTitle = (title || (parsed && parsed.title) || fallbackTitle).trim();
+  const storedPath = saveBookBuffer(buffer, booksDir, finalTitle, EPUB_EXTENSION);
+  const stats = fs.statSync(storedPath);
+  const book = {
+    title: finalTitle,
+    author: author || (parsed && parsed.author) || '',
+    description: description || (parsed && parsed.description) || '',
+    // 封面默认由 /book-cover 提供；调用方显式传入地址时优先使用
+    coverImg: typeof coverImg === 'string' ? coverImg.trim() : '',
+    sourcePath: filePath,
+    storedPath,
+    fileName: path.basename(storedPath),
+    size: `${Math.round(stats.size / 1024)} KB`,
+    fileType: 'epub',
+    directoryEntries: directoryEntries === undefined || directoryEntries === ''
+      ? (parsed ? epubDirectoryEntries(parsed) : '')
+      : splitDirectoryEntries(directoryEntries).join('\n'),
+    createdAt: new Date().toISOString(),
+    epubCoverAvailable: Boolean(parsed && parsed.cover)
+  };
+  return decorateBookCover(insertBookWithCover(book), { absolute: true });
 });
 
 ipcMain.handle('get-books', async () => {
@@ -618,7 +1166,9 @@ ipcMain.handle('update-book', async (_, payload) => {
     title: title ?? existing.title,
     author: author ?? existing.author ?? '',
     description: description ?? existing.description ?? '',
-    coverImg: coverImg ?? existing.coverImg ?? '',
+    coverImg: coverImg === undefined
+      ? (existing.coverImg || '')
+      : resolveUpdatedCover(existing, coverImg),
     directoryEntries: directoryEntries === undefined
       ? existing.directoryEntries || ''
       : splitDirectoryEntries(directoryEntries).join('\n')
@@ -646,11 +1196,10 @@ ipcMain.handle('parse-book', async (_, { bookId }) => {
   if (!book) {
     throw new Error('找不到书籍信息');
   }
-  const fileContent = fs.readFileSync(book.storedPath, 'utf8');
   const rules = await loadRules(rulesPath);
   const directoryEntries = splitDirectoryEntries(book.directoryEntries);
-  const chapters = parseTextToChapters(fileContent, rules, directoryEntries);
-  return { book: decorateBookCover(book, { absolute: true }), chapters };
+  const { chapters, epub } = loadBookChapters(book, rules, directoryEntries);
+  return { book: decorateBookCover(book, { absolute: true }), chapters, epub };
 });
 
 ipcMain.handle('get-rules', async () => {

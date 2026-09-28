@@ -169,6 +169,13 @@ async function createDatabase(dbPath) {
       stmt.free();
       saveDb();
       return { ...book };
+    },
+    updateBookCover: (id, coverImg) => {
+      const stmt = db.prepare('UPDATE books SET cover_img = ? WHERE id = ?');
+      stmt.run([coverImg ?? '', id]);
+      stmt.free();
+      saveDb();
+      return coverImg ?? '';
     }
   };
 }
