@@ -13,7 +13,7 @@ contextBridge.exposeInMainWorld('api', {
   readHtmlFiles: () => ipcRenderer.invoke('read-html-files'),
   openUrl: (url) => ipcRenderer.invoke('open-url', url),
   updateBook: (payload) => ipcRenderer.invoke('update-book', payload),
-  // EPUB：上传解析（图片以 base64 内嵌返回）与保存为书籍
+  // 电子书（EPUB/PDF）：上传解析（图片以 base64 内嵌返回）与保存为书籍
   parseEpubFile: (payload) => ipcRenderer.invoke('parse-epub-file', payload),
   uploadEpubBook: (payload) => ipcRenderer.invoke('upload-epub-book', payload)
 });

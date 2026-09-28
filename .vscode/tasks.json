@@ -7,6 +7,55 @@
 			"command": "node --test \"test/*.test.js\"",
 			"problemMatcher": [],
 			"group": "test"
+		},
+		{
+			"label": "test: final",
+			"type": "shell",
+			"command": "node --test \"test/*.test.js\"",
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "test: pdf images",
+			"type": "shell",
+			"command": "node --test test/pdfParser.test.js",
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "probe: pdf inline size",
+			"type": "shell",
+			"command": "node tmp-pdf-inline.js",
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "test: ebook inline",
+			"type": "shell",
+			"command": "node --test \"test/*.test.js\"",
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "e2e: pdf images",
+			"type": "shell",
+			"command": "node tmp-ebook-images-e2e.js",
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "cleanup: pdf image temps",
+			"type": "shell",
+			"command": "Remove-Item -Force tmp-pdf-inline.js,tmp-ebook-images-e2e.js; Remove-Item -Recurse -Force .tmp-e2e-data; Get-ChildItem -Force -Name",
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "test: final ebook images",
+			"type": "shell",
+			"command": "node --test \"test/*.test.js\"",
+			"problemMatcher": [],
+			"group": "test"
 		}
 	]
 }

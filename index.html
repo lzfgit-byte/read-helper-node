@@ -119,7 +119,7 @@
       <h1>Reader Helper</h1>
       <ul class="menu">
         <li><button class="menu-item active" data-target="upload-section">上传管理</button></li>
-        <li><button class="menu-item" data-target="epub-section">EPUB 上传解析</button></li>
+        <li><button class="menu-item" data-target="epub-section">电子书上传解析</button></li>
         <li><button class="menu-item" data-target="books-section">书籍列表</button></li>
         <li><button class="menu-item" data-target="rules-section">章节规则</button></li>
         <li><button class="menu-item" data-target="html-section">HTML 服务</button></li>
@@ -147,22 +147,22 @@
 
       <section id="epub-section" class="section">
         <div class="panel">
-          <h2>EPUB 上传解析</h2>
-          <div class="help-text">选择 EPUB 文件后上传解析，EPUB 内的章节图片会以 base64 内嵌在返回的 HTML 中，封面则以 URL 形式返回，前端无需再请求图片接口。</div>
-          <div class="field"><button id="select-epub-file">选择 EPUB 文件</button></div>
+          <h2>电子书上传解析（EPUB / PDF）</h2>
+          <div class="help-text">选择 EPUB 或 PDF 文件后上传解析：EPUB 按目录/正文分章，PDF 优先按书签分章（无书签则每页一章），章节图片以 base64 内嵌在返回的 HTML 中，封面则以 URL 形式返回。扫描版 PDF 没有文本层，正文将是内嵌的整页图片。</div>
+          <div class="field"><button id="select-epub-file">选择电子书文件</button></div>
           <div class="grid-2">
             <div class="field">
               <label class="field-label" for="epub-title">书名</label>
-              <input id="epub-title" placeholder="留空则自动读取 EPUB 元数据" />
+              <input id="epub-title" placeholder="留空则自动读取元数据" />
             </div>
             <div class="field">
               <label class="field-label" for="epub-author">作者</label>
-              <input id="epub-author" placeholder="留空则自动读取 EPUB 元数据" />
+              <input id="epub-author" placeholder="留空则自动读取元数据" />
             </div>
           </div>
           <div class="field">
             <label class="field-label" for="epub-desc">简介</label>
-            <textarea id="epub-desc" rows="3" placeholder="留空则自动读取 EPUB 元数据"></textarea>
+            <textarea id="epub-desc" rows="3" placeholder="留空则自动读取元数据"></textarea>
           </div>
           <div class="grid-2">
             <div class="field"><button id="parse-epub">上传并解析</button></div>
@@ -171,7 +171,7 @@
           <div class="field"><span id="epub-status"></span></div>
         </div>
         <div class="panel" id="epub-result-panel" style="display:none;">
-          <h2>EPUB 解析结果</h2>
+          <h2>解析结果</h2>
           <div id="epub-result"></div>
         </div>
       </section>
@@ -203,7 +203,7 @@
                 <div class="cover-preview" id="edit-cover-preview"><span>📖</span></div>
                 <input id="edit-book-cover" placeholder="封面 URL（可选）" />
               </div>
-              <div class="help-text">支持 http(s) 图片地址，左侧实时预览；EPUB 书籍留空则沿用自动封面。</div>
+              <div class="help-text">支持 http(s) 图片地址，左侧实时预览；EPUB/PDF 书籍留空则沿用自动封面。</div>
             </div>
             <div class="field">
               <label class="field-label" for="edit-book-directory">目录项</label>
@@ -614,17 +614,18 @@
       const meta = [book.author || '未知作者', `共 ${chapters.length} 章`, book.size].filter(Boolean).join(' · ');
       const header = document.createElement('div');
       header.className = 'parse-header';
-      const epubInfo = result.epub
-        ? `<div class="parse-meta">EPUB：封面与 ${result.epub.imageCount} 张插图已内嵌为 base64，展开章节即可查看</div>`
+      const ebook = result.ebook || result.epub;
+      const ebookInfo = ebook
+        ? `<div class="parse-meta">${ebook.format === 'pdf' ? 'PDF' : 'EPUB'}：封面与 ${ebook.imageCount} 张插图已内嵌为 base64，展开章节即可查看${ebook.scanned ? '；扫描版文件没有文本层' : ''}</div>`
         : '';
-      const coverHtml = result.epub && result.epub.coverImg
-        ? `<img src="${escapeHtml(result.epub.coverImg)}" alt="封面" style="width:84px;border-radius:8px;border:1px solid #eef2f7;margin-right:14px;float:left;" />`
+      const coverHtml = ebook && ebook.coverImg
+        ? `<img src="${escapeHtml(ebook.coverImg)}" alt="封面" style="width:84px;border-radius:8px;border:1px solid #eef2f7;margin-right:14px;float:left;" onerror="this.style.display='none'" />`
         : '';
       header.innerHTML = `
         ${coverHtml}
         <div class="parse-title">${escapeHtml(book.title)}</div>
         <div class="parse-meta">${escapeHtml(meta)}</div>
-        ${epubInfo}
+        ${ebookInfo}
       `;
       output.appendChild(header);
 
@@ -644,7 +645,7 @@
 
       let filterTimer = null;
       let allExpanded = false;
-      const chapterOptions = { rich: !!result.epub };
+      const chapterOptions = { rich: !!(result.ebook || result.epub) };
       const toggleAllButton = document.getElementById('toggle-all-chapters');
       document.getElementById('chapter-filter').addEventListener('input', (event) => {
         clearTimeout(filterTimer);
@@ -713,7 +714,7 @@
       }
     }
 
-    // ---------------------- EPUB 上传解析 ----------------------
+    // ---------------------- 电子书（EPUB / PDF）上传解析 ----------------------
     let selectedEpubPath = null;
     let lastEpubResult = null;
 
@@ -724,9 +725,9 @@
         status.innerText = '未选择文件';
         return;
       }
-      if (!/\.epub$/i.test(filePath)) {
+      if (!/\.(epub|pdf)$/i.test(filePath)) {
         selectedEpubPath = null;
-        status.innerText = `请选择 .epub 文件，当前选择：${filePath}`;
+        status.innerText = `请选择 .epub 或 .pdf 文件，当前选择：${filePath}`;
         return;
       }
       selectedEpubPath = filePath;
@@ -746,8 +747,10 @@
       const book = payload.book || {};
       const chapters = payload.chapters || [];
       const stats = payload.stats || {};
+      const isPdf = (payload.format || book.format) === 'pdf';
       const info = [
         `章节 ${chapters.length}`,
+        isPdf ? `页数 ${book.pageCount || stats.pageCount || 0}` : '',
         `内嵌图片 ${stats.imageCount || 0} 张`,
         payload.size,
         book.language
@@ -756,12 +759,13 @@
       const header = document.createElement('div');
       header.className = 'epub-meta';
       header.innerHTML = `
-        ${book.coverImg ? `<img src="${escapeHtml(book.coverImg)}" alt="封面" />` : ''}
+        ${book.coverImg ? `<img src="${escapeHtml(book.coverImg)}" alt="封面" onerror="this.style.display='none'" />` : ''}
         <div>
           <h3>${escapeHtml(book.title || payload.fileName || '未命名')}</h3>
           <p>作者：${escapeHtml(book.author || '未知')}${book.publisher ? `　出版社：${escapeHtml(book.publisher)}` : ''}</p>
           <p>${escapeHtml(info)}</p>
           ${book.description ? `<p class="epub-desc">${escapeHtml(book.description)}</p>` : ''}
+          ${book.scanned ? '<p class="epub-desc">扫描版文件：没有文本层，未能提取正文，仅能作为图片/封面保存。</p>' : ''}
         </div>
       `;
       output.appendChild(header);
@@ -769,7 +773,7 @@
       if (chapters.length === 0) {
         const empty = document.createElement('div');
         empty.className = 'parse-empty';
-        empty.textContent = '未解析出章节，请确认 EPUB 文件是否完整。';
+        empty.textContent = '未解析出章节，请确认电子书文件是否完整。';
         output.appendChild(empty);
         return;
       }
@@ -785,7 +789,7 @@
     document.getElementById('parse-epub').onclick = async () => {
       const status = document.getElementById('epub-status');
       if (!selectedEpubPath) {
-        status.innerText = '请先选择 EPUB 文件。';
+        status.innerText = '请先选择电子书文件。';
         return;
       }
       status.innerText = '正在解析……';
@@ -793,7 +797,9 @@
         const result = await window.api.parseEpubFile({ filePath: selectedEpubPath, inlineImages: true });
         lastEpubResult = result;
         renderEpubResult(result);
-        status.innerText = `解析成功：共 ${result.chapters.length} 章，内嵌图片 ${result.stats.imageCount} 张（base64）`;
+        const warnings = (result.book && result.book.warnings) || [];
+        status.innerText = `解析成功：共 ${result.chapters.length} 章，内嵌图片 ${(result.stats && result.stats.imageCount) || 0} 张（base64）`
+          + (warnings.length ? `；${warnings.join('；')}` : '');
       } catch (error) {
         lastEpubResult = null;
         status.innerText = `解析失败：${error.message || error}`;
@@ -803,7 +809,7 @@
     document.getElementById('save-epub-book').onclick = async () => {
       const status = document.getElementById('epub-status');
       if (!selectedEpubPath) {
-        status.innerText = '请先选择 EPUB 文件。';
+        status.innerText = '请先选择电子书文件。';
         return;
       }
       status.innerText = '正在保存……';
