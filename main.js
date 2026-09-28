@@ -373,7 +373,9 @@ function startStaticServer(openBrowser = false) {
   function readEpubOptions(body = {}) {
     return {
       inlineImages: body.inlineImages !== 'false' && body.inlineImages !== false,
-      inlineStyles: body.inlineStyles !== 'false' && body.inlineStyles !== false
+      inlineStyles: body.inlineStyles !== 'false' && body.inlineStyles !== false,
+      unwrapImages: body.unwrapImages !== 'false' && body.unwrapImages !== false,
+      blockImages: body.blockImages !== 'false' && body.blockImages !== false
     };
   }
 
@@ -389,7 +391,8 @@ function startStaticServer(openBrowser = false) {
         message: '解析成功',
         fileName: file.originalname,
         size: `${Math.round(file.buffer.length / 1024)} KB`,
-        book: buildEpubSummary(parsed, cacheEpubCover(parsed, { absolute: true })),
+        // 用相对地址返回，客户端（如阅读 App/书源）会按请求域名补全，避免写成 localhost
+        book: buildEpubSummary(parsed, cacheEpubCover(parsed)),
         toc: parsed.toc,
         chapters: parsed.chapters,
         images: parsed.images,
@@ -1099,12 +1102,12 @@ ipcMain.handle('upload-book', async (_, payload) => {
 });
 
 ipcMain.handle('parse-epub-file', async (_, payload = {}) => {
-  const { filePath, inlineImages, inlineStyles, includeText, maxChapters } = payload;
+  const { filePath, inlineImages, inlineStyles, includeText, unwrapImages, blockImages, maxChapters } = payload;
   if (!filePath || !fs.existsSync(filePath)) {
     throw new Error('未找到 EPUB 文件');
   }
   const buffer = fs.readFileSync(filePath);
-  const parsed = parseEpubBuffer(buffer, { inlineImages, inlineStyles, includeText, maxChapters });
+  const parsed = parseEpubBuffer(buffer, { inlineImages, inlineStyles, includeText, unwrapImages, blockImages, maxChapters });
   return {
     ...parsed,
     fileName: path.basename(filePath),

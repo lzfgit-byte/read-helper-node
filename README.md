@@ -26,10 +26,12 @@ Electron 应用，支持：
 - 选择 `.epub` 文件后上传，自动读取书名、作者、简介与封面
 - 按 `spine` 顺序输出章节，章节标题优先取 `<h1>~<h6>`，其次取 NCX/Nav 目录标题
 - 章节内的图片（`<img>`、SVG `<image>`、CSS `url(...)`）转换为 `data:<mime>;base64,...` 内嵌在返回的 HTML 中，前端无需再请求图片接口
+- **正文图片直接内联展示**：多看书系等 EPUB 会把插图/注号图包成 `<sup><a href="..."><img/></a></sup>`，解析时会把这类「只包图片」的 `sup`/`sub`/`a` 包裹层去掉，只保留 `<img>` 本身（带文字的正常链接不动）；可用 `unwrapImages: false` 关闭
 - **封面不内嵌 base64，一律以 URL 形式提供**：
   - 仅解析（未保存）时封面写入缓存目录，返回 `http://localhost:3000/epub-covers/<sha1>.<ext>`
   - 保存为书籍后 `coverImg` 为 `/book-cover?id=<书籍id>`，由接口从 EPUB 文件中实时提取（内存缓存，取图无需重复解析）
   - 书籍编辑时封面留空会沿用自动封面地址，不会被清空
+- **正文图片统一块级展示**：每个 `<img>` 都会合并为 `style="display:block"`（保留原有其它样式声明），并在前后补 `<br/>` 分隔；图片旁已有的 `<br/>` 不会重复叠加，可用 `blockImages: false` 关闭
 - `head` 中的本地样式表会内联进章节内容，脚本与内联事件会被剔除
 - 可「保存为书籍」，解析出的目录项会保存为章节标题
 
@@ -58,7 +60,7 @@ Electron 应用，支持：
 - `POST /data-operate/epub/upload`：上传 EPUB，解析元数据并保存为书籍
 - `GET /book-cover?id=<bookId>`：按书籍 id 返回 EPUB 提取出的封面图片
 - `GET /epub-covers/<sha1>.<ext>`：未保存 EPUB 的封面缓存
-- IPC：`parseEpubFile({ filePath, inlineImages, inlineStyles, includeText })`、`uploadEpubBook({ filePath, title, author, description })`
+- IPC：`parseEpubFile({ filePath, inlineImages, inlineStyles, includeText, unwrapImages, blockImages })`、`uploadEpubBook({ filePath, title, author, description })`
 
 解析由 `epubParser.js` 完成，内置最小 ZIP 读取实现（只用 Node 的 `zlib`），无需额外依赖。
 

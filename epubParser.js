@@ -553,6 +553,70 @@ function collectHeadStyles(headHtml, baseDir, loader, options, images) {
   return parts.join('\n');
 }
 
+// 正文图片只保留 <img> 本身：多看书系等 EPUB 会把插图/注号图包成
+// <sup><a href="..."><img/></a></sup>，阅读器里会显示成上标链接而不是正文图片。
+// 仅当包裹层里除 <img> 外没有其它内容时才拆掉，避免误删带文字的链接。
+const IMAGE_WRAPPER_TAGS = ['sup', 'sub', 'a'];
+// 包裹层内除 <img> 外只允许空白与 &nbsp;，避免误删带文字/其它标签的链接
+const IMAGE_ONLY_CONTENT_REGEX = /^(?:(?:&nbsp;|&#160;|\s)*<img\b[^>]*\/?>)+(?:&nbsp;|&#160;|\s)*$/i;
+
+function unwrapImageWrappers(html) {
+  let output = String(html || '');
+  // 嵌套层最多迭代几轮，例如 <sup><a><img/></a></sup>
+  for (let pass = 0; pass < 4; pass++) {
+    const before = output;
+    for (const tag of IMAGE_WRAPPER_TAGS) {
+      const regex = new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)<\\/${tag}\\s*>`, 'gi');
+      output = output.replace(regex, (whole, inner) =>
+        (IMAGE_ONLY_CONTENT_REGEX.test(inner) ? inner.trim() : whole));
+    }
+    if (output === before) {
+      break;
+    }
+  }
+  return output;
+}
+
+// 图片样式合并为块级：保留原有其它声明，只把 display 换成 block
+function mergeBlockStyle(value) {
+  const parts = String(value || '')
+    .split(';')
+    .map((part) => part.trim())
+    .filter((part) => part && !/^display\s*:/i.test(part));
+  return ['display:block', ...parts].join('; ');
+}
+
+function toBlockImageTag(rawAttrs) {
+  const attrs = String(rawAttrs || '').trim();
+  const styleMatch = attrs.match(/\sstyle\s*=\s*("([^"]*)"|'([^']*)')/i);
+  if (styleMatch) {
+    const value = styleMatch[2] !== undefined ? styleMatch[2] : styleMatch[3];
+    return `<img ${attrs.replace(styleMatch[0], ` style="${mergeBlockStyle(value)}"`)} />`;
+  }
+  return attrs ? `<img ${attrs} style="display:block" />` : '<img style="display:block" />';
+}
+
+// 正文图片统一改成块级，并在前后补 <br/> 分隔；已在图片旁的 <br/> 不会重复添加
+function blockifyContentImages(html) {
+  const source = String(html || '');
+  const regex = /(?:<br\s*\/?>\s*)?<img\b([^>]*?)\/?>(?:\s*<br\s*\/?>)?/gi;
+  let output = '';
+  let cursor = 0;
+  let lastEndedWithBreak = false;
+  let match;
+  while ((match = regex.exec(source))) {
+    const gap = source.slice(cursor, match.index);
+    output += gap;
+    // 紧接着上一张图（中间只有空白）时不再重复前置 <br/>
+    const needsLeadingBreak = !(lastEndedWithBreak && gap.trim() === '');
+    output += `${needsLeadingBreak ? '<br/>' : ''}${toBlockImageTag(match[1])}<br/>`;
+    lastEndedWithBreak = true;
+    cursor = regex.lastIndex;
+  }
+  output += source.slice(cursor);
+  return output;
+}
+
 // 把章节文档处理成“自包含”的 HTML 片段：内联样式 + 图片转 base64 data URI
 function inlineResources(documentHtml, baseDir, loader, options, images) {
   const inlineImages = options.inlineImages !== false;
@@ -613,6 +677,16 @@ function inlineResources(documentHtml, baseDir, loader, options, images) {
     });
   }
 
+  // 5. 正文图片去掉 <sup>/<sub>/<a> 包裹，直接以 <img> 内联展示
+  if (options.unwrapImages !== false) {
+    output = unwrapImageWrappers(output);
+  }
+
+  // 6. 正文图片改成块级样式，并在前后加 <br/> 分隔
+  if (options.blockImages !== false) {
+    output = blockifyContentImages(output);
+  }
+
   const beforeStyles = headStyles ? `<style>\n${headStyles}\n</style>\n` : '';
   return sanitizeHtml(`${beforeStyles}${output}`);
 }
@@ -638,6 +712,8 @@ function parseEpubBuffer(input, options = {}) {
     inlineStyles: options.inlineStyles !== false,
     includeText: options.includeText !== false,
     includeChapters: options.includeChapters !== false,
+    unwrapImages: options.unwrapImages !== false,
+    blockImages: options.blockImages !== false,
     maxChapters: Number.isFinite(options.maxChapters) && options.maxChapters > 0 ? options.maxChapters : Infinity
   };
   const buffer = Buffer.isBuffer(input) ? input : Buffer.from(input);
@@ -807,5 +883,7 @@ module.exports = {
   openZip,
   readCentralDirectory,
   decodeText,
-  htmlToText
+  htmlToText,
+  unwrapImageWrappers,
+  blockifyContentImages
 };

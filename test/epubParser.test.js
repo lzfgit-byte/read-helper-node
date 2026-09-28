@@ -274,6 +274,127 @@ test('resolves relative image paths and svg wrappers', () => {
   assert.ok(result.chapters[0].content.includes('width="100"'));
 });
 
+test('unwraps images from sup/a wrappers so they render inline', () => {
+  const files = [
+    { name: 'mimetype', data: 'application/epub+zip' },
+    { name: 'META-INF/container.xml', data: CONTAINER_XML },
+    { name: 'OEBPS/content.opf', data: OPF_XML },
+    { name: 'OEBPS/images/pic.png', data: PNG_BUFFER },
+    {
+      name: 'OEBPS/chapter1.xhtml',
+      data: `<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml"><body>
+<h2>注释章节</h2>
+<p>正文<sup><a href="chapter1.xhtml#fn1" class="duokan-footnote"><img src="images/pic.png" alt="注1"/></a></sup>继续。</p>
+<a href="chapter1.xhtml#note"><img src="images/pic.png"/></a>
+<p>脚注：<a href="chapter1.xhtml#fn1">[1]</a> 说明文字</p>
+</body></html>`,
+      compress: true
+    },
+    {
+      name: 'OEBPS/chapter2.xhtml',
+      data: '<?xml version="1.0" encoding="UTF-8"?><html xmlns="http://www.w3.org/1999/xhtml"><body><p>二</p></body></html>'
+    }
+  ];
+  const result = parseEpubBuffer(createZip(files));
+  const content = result.chapters[0].content;
+
+  assert.ok(!/<sup/i.test(content), 'sup 包裹应被去掉');
+  assert.ok(!/<a\b/i.test(content) || !content.includes('duokan-footnote'), '图片上的 a 包裹应被去掉');
+  assert.ok(!content.includes('<a href="chapter1.xhtml#note"'), '只包图片的链接应被去掉');
+  // data:image 后面紧跟的 img 标签应直接位于正文中（不再被 sup/a 套住）
+  const imageIndex = content.indexOf('data:image/png;base64,');
+  assert.ok(imageIndex > 0);
+  assert.ok(content.slice(Math.max(0, imageIndex - 60), imageIndex).includes('<img '), '图片应直接以 img 内联');
+  // 带文字的正常链接必须保留
+  assert.ok(content.includes('<a href="chapter1.xhtml#fn1">[1]</a>'), '带文字的链接应保留');
+});
+
+test('keeps sup/a wrappers when unwrapImages is disabled', () => {
+  const files = [
+    { name: 'mimetype', data: 'application/epub+zip' },
+    { name: 'META-INF/container.xml', data: CONTAINER_XML },
+    { name: 'OEBPS/content.opf', data: OPF_XML },
+    { name: 'OEBPS/images/pic.png', data: PNG_BUFFER },
+    {
+      name: 'OEBPS/chapter1.xhtml',
+      data: '<html><body><p>正文<sup><a href="#fn1"><img src="images/pic.png"/></a></sup></p></body></html>',
+      compress: true
+    },
+    {
+      name: 'OEBPS/chapter2.xhtml',
+      data: '<?xml version="1.0" encoding="UTF-8"?><html xmlns="http://www.w3.org/1999/xhtml"><body><p>二</p></body></html>'
+    }
+  ];
+  const result = parseEpubBuffer(createZip(files), { unwrapImages: false });
+  const content = result.chapters[0].content;
+
+  assert.ok(content.includes('<sup>'), '关闭后应保留原包裹');
+  assert.ok(content.includes('<a href="#fn1">'));
+});
+
+test('renders body images as blocks separated by <br/>', () => {
+  const files = [
+    { name: 'mimetype', data: 'application/epub+zip' },
+    { name: 'META-INF/container.xml', data: CONTAINER_XML },
+    { name: 'OEBPS/content.opf', data: OPF_XML },
+    { name: 'OEBPS/images/pic.png', data: PNG_BUFFER },
+    {
+      name: 'OEBPS/chapter1.xhtml',
+      data: `<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml"><body>
+<h1>图片章节</h1>
+<p>正文里有图<img src="images/pic.png" alt="图1"/>后面还有字。</p>
+<p><img src="images/pic.png" style="display:inline;width:100%" alt="图2"/></p>
+<p>已带换行<br/><img src="images/pic.png" alt="图3"/><br/>结束</p>
+<p><img src="images/pic.png" alt="图4"/><img src="images/pic.png" alt="图5"/></p>
+</body></html>`,
+      compress: true
+    },
+    {
+      name: 'OEBPS/chapter2.xhtml',
+      data: '<?xml version="1.0" encoding="UTF-8"?><html xmlns="http://www.w3.org/1999/xhtml"><body><p>二</p></body></html>'
+    }
+  ];
+  const content = parseEpubBuffer(createZip(files)).chapters[0].content;
+
+  assert.ok(content.includes('<br/><img '), '图片前应有 <br/> 且图片直接内联');
+  assert.ok(/<img\b[^>]*style="display:block"[^>]*\/><br\/>/.test(content), '图片后应有 <br/> 与块级样式');
+  // 原有样式保留，display 被替换为 block
+  assert.ok(content.includes('style="display:block; width:100%"'));
+  assert.ok(!content.includes('display:inline'));
+  // 四周本来就有的 <br/> 不会重复叠加
+  assert.ok(!content.includes('<br/><br/>'));
+  // 每张图前后都各有一个 <br/>
+  const imageCount = (content.match(/<img\b/g) || []).length;
+  assert.equal(imageCount, 5);
+  assert.equal((content.match(/<br\/>\s*<img\b/g) || []).length, imageCount, '每张图前应有 <br/>');
+  assert.equal((content.match(/<img\b[^>]*?\/>\s*<br\/>/g) || []).length, imageCount, '每张图后应有 <br/>');
+});
+
+test('keeps images untouched when blockImages is disabled', () => {
+  const files = [
+    { name: 'mimetype', data: 'application/epub+zip' },
+    { name: 'META-INF/container.xml', data: CONTAINER_XML },
+    { name: 'OEBPS/content.opf', data: OPF_XML },
+    { name: 'OEBPS/images/pic.png', data: PNG_BUFFER },
+    {
+      name: 'OEBPS/chapter1.xhtml',
+      data: '<html><body><p>图<img src="images/pic.png" style="display:inline"/></p></body></html>',
+      compress: true
+    },
+    {
+      name: 'OEBPS/chapter2.xhtml',
+      data: '<?xml version="1.0" encoding="UTF-8"?><html xmlns="http://www.w3.org/1999/xhtml"><body><p>二</p></body></html>'
+    }
+  ];
+  const content = parseEpubBuffer(createZip(files), { blockImages: false }).chapters[0].content;
+
+  assert.ok(content.includes('style="display:inline"'));
+  assert.ok(!content.includes('<br/>'));
+  assert.ok(content.includes(`src="data:image/png;base64,${PNG_BASE64}"`));
+});
+
 test('throws on a file that is not a zip', () => {
   assert.throws(() => parseEpubBuffer(Buffer.from('not a zip file')), /ZIP/);
 });
