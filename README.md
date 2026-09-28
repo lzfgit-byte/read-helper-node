@@ -42,9 +42,12 @@ Electron 应用，支持：
 - **标题被拆到不同 xhtml 时自动合并**：某章没有正文（空内容或只有标题）、下一章有正文，且两个标题合起来仍符合章节规则时，合并为一个目录（如「第十二章」+「风起云涌」→「第十二章 风起云涌」，正文跟在合并后的目录后）。判断逻辑与 TXT 章节解析完全共用（`parseRules.js` 的 `mergeChapterTitles`），服务端会把当前章节规则传进来；插图页（只含 `<img>`）和下一章本身是完整「第X章」标题的情况不合并，合并后的章节会带 `sourceHrefs` 便于排查
 - 章节内的图片（`<img>`、SVG `<image>`、CSS `url(...)`）默认转成 `data:<mime>;base64,...` 内嵌在返回的 HTML 中，前端无需再请求图片接口
   - **但不再“无限内嵌”**：整本内嵌总量默认上限 24 MB、单张 8 MB，超过的图片在**已保存的书籍**里会自动改用 `/epub-image?id=<书籍id>&href=<书籍内路径>` 按需地址（图片实时从 EPUB 里取出并少量缓存，LRU 64），图片很多的漫画类书籍不会再把堆撑爆；未保存的解析（没有按需地址）则会跳过并在 `book.warnings` 里提示
+  - **字体等非图片资源默认不内嵌**：同一字体常被多章引用，base64 会在每章重复一份（这本书光字体就 23 MB）→ 统一改为按需地址，需要旧行为可传 `inlineFonts: true`
+  - 未保存的解析（没有 `/epub-image` 地址）会把超预算的图片/字体写到 `ebook-assets` 缓存目录，返回 `/ebook-assets/<sha1>.<ext>`（按内容 sha1 去重，同一张图只写一份），不再直接丢图
   - 可用 `imageMode: 'url'` 把全部图片改为按需地址，`imageMode: 'none'` 完全不处理图片（保留原始相对地址），`maxInlineImageBytes` / `maxImageBytes` 调整预算
   - 统计在 `stats` 里：`imageMode`（`inline`/`url`/`none`）、`imageCount`（引用张数）、`inlinedImages`（base64 张数）、`imageBytes`、`skippedImages`（改用按需或跳过）
 - **正文图片直接内联展示**：多看书系等 EPUB 会把插图/注号图包成 `<sup><a href="..."><img/></a></sup>`，解析时会把这类「只包图片」的 `sup`/`sub`/`a` 包裹层去掉，只保留 `<img>` 本身（带文字的正常链接不动）；可用 `unwrapImages: false` 关闭
+- **懒加载图片（微信读书等导出）**：`<img data-src="..." src="占位/相对路径">` 这类写法里，base64 只会写进真正的 `src`（不再误改 `data-src`）；`src` 是空值或 1×1 占位图时会改用 `data-src` / `data-original` 等属性指向的书内图片，保证阅读器上真得能显示出图
 - **封面不内嵌 base64，一律以 URL 形式提供**：
   - 仅解析（未保存）时封面写入缓存目录，返回 `http://localhost:3000/epub-covers/<sha1>.<ext>`
   - 保存为书籍后 `coverImg` 为 `/book-cover?id=<书籍id>`，由接口从 EPUB 文件中实时提取（内存缓存，取图无需重复解析）
@@ -86,6 +89,7 @@ Electron 应用，支持：
 - `POST /data-operate/epub/upload`：上传 EPUB/PDF，解析元数据并保存为书籍
 - `GET /book-cover?id=<bookId>`：按书籍 id 返回从 EPUB/PDF 里提取出的封面图片
 - `GET /epub-image?id=<bookId>&href=<书籍内路径>`：按需返回 EPUB 里的正文图片（超内嵌预算的章节图片地址）
+- `GET /ebook-assets/<sha1>.<ext>`：仅解析（未保存）时超预算图片/字体的磁盘缓存（按内容去重）
 - `GET /pdf-page?id=<bookId>&page=<页号>&name=<图片名>`：按页实时解码并返回 PDF 正文图片（正文里的按需地址）
 - `GET /epub-covers/<sha1>.<ext>`：未保存电子书的封面缓存
 - `GET /epub-covers/<sha1>.<ext>`：未保存电子书的封面缓存

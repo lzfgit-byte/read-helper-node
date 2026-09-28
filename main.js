@@ -13,6 +13,7 @@ const { ensureDir, saveBookFile, saveBookBuffer, readHtmlList } = require('./fil
 const appDataDir = path.join(app.getPath('userData'), 'reader-helper');
 const booksDir = path.join(appDataDir, 'books');
 const coversDir = path.join(appDataDir, 'epub-covers');
+const assetsDir = path.join(appDataDir, 'ebook-assets');
 const javaHtmlDir = path.join('d:', 'projects', 'reader-help', 'src', 'main', 'resources', 'templates');
 const htmlDir = fs.existsSync(javaHtmlDir) ? javaHtmlDir : path.join(__dirname, 'public', 'html');
 const dbPath = path.join(appDataDir, 'reader-helper.db');
@@ -27,6 +28,8 @@ const BOOK_COVER_PATH = '/book-cover';
 const PDF_PAGE_PATH = '/pdf-page';
 // EPUB 正文图片按需提供（图片多/体积大的书籍走这里，不把整本 base64 塞进章节）
 const EPUB_IMAGE_PATH = '/epub-image';
+// 仅解析（未保存）时，超内嵌预算的图片/字体写到磁盘再通过静态地址提供
+const EBOOK_ASSETS_PATH = '/ebook-assets';
 // 仅解析（未保存）时，封面先落到缓存目录再通过静态地址提供
 const EPUB_COVER_CACHE_PATH = '/epub-covers';
 const COVER_EXTENSIONS = {
@@ -38,7 +41,12 @@ const COVER_EXTENSIONS = {
   'image/svg+xml': '.svg',
   'image/avif': '.avif',
   'image/jp2': '.jp2',
-  'image/jpx': '.jp2'
+  'image/jpx': '.jp2',
+  'font/woff2': '.woff2',
+  'font/woff': '.woff',
+  'font/ttf': '.ttf',
+  'font/otf': '.otf',
+  'application/vnd.ms-fontobject': '.eot'
 };
 let serverInstance = null;
 let serverPort = 3000;
@@ -140,6 +148,30 @@ function ebookDirectoryEntries(parsed, kind) {
   }
   const titles = (parsed.chapters || []).map((chapter) => chapter.title).filter(Boolean);
   return titles.join('\n');
+}
+
+// 仅解析（未保存）的电子书：超预算资源写入缓存目录，返回可直接访问的静态地址。
+// 同名内容按 sha1 去重，重复引用（如同一字体被多章引用）只写一份。
+function cacheEbookResource(resource) {
+  if (!resource || !resource.data) {
+    return '';
+  }
+  ensureDir(assetsDir);
+  const extension = COVER_EXTENSIONS[resource.mediaType]
+    || path.extname(String(resource.href || '').split(/[?#]/)[0])
+    || '.bin';
+  const hash = crypto.createHash('sha1').update(resource.data).digest('hex');
+  const fileName = `${hash}${extension}`;
+  const destPath = path.join(assetsDir, fileName);
+  if (!fs.existsSync(destPath)) {
+    fs.writeFileSync(destPath, resource.data);
+  }
+  return `${EBOOK_ASSETS_PATH}/${encodeURIComponent(fileName)}`;
+}
+
+// 未保存解析时的解析选项：超预算资源写盘取地址，避免图片直接消失或内存爆掉
+function readResourceCacheOptions() {
+  return { resourceCache: (resource) => cacheEbookResource(resource) };
 }
 
 // 已保存书籍的封面地址（相对路径，由 /book-cover 从原文件里提取）
@@ -455,12 +487,16 @@ function startStaticServer(openBrowser = false) {
   }
   ensureDir(htmlDir);
   ensureDir(coversDir);
+  ensureDir(assetsDir);
   const appServer = express();
   appServer.use(express.json());
   appServer.use(express.urlencoded({ extended: true }));
 
   // 仅解析（尚未保存）的 EPUB 封面缓存目录
   appServer.use(EPUB_COVER_CACHE_PATH, express.static(coversDir, { index: false, maxAge: '7d' }));
+
+  // 仅解析（尚未保存）时超预算的正文图片/字体缓存
+  appServer.use(EBOOK_ASSETS_PATH, express.static(assetsDir, { index: false, maxAge: '7d' }));
 
   // 已保存 EPUB 书籍的封面：从 EPUB 文件中提取后按 URL 返回（不内嵌 base64）
   appServer.get(BOOK_COVER_PATH, async (req, res) => {
@@ -598,7 +634,9 @@ function startStaticServer(openBrowser = false) {
         ? Number(body.maxInlineImageBytes)
         : undefined,
       // PDF 专用：inline=base64 内嵌 / url=按需地址
-      ...readImageOptions(body)
+      ...readImageOptions(body),
+      // 未保存的解析：超预算资源写盘后返回 /ebook-assets/<sha1>.<ext>
+      ...readResourceCacheOptions()
     };
   }
 
@@ -1269,6 +1307,7 @@ app.whenReady().then(async () => {
   ensureDir(appDataDir);
   ensureDir(booksDir);
   ensureDir(coversDir);
+  ensureDir(assetsDir);
   database = await createDatabase(dbPath);
   loadRules(rulesPath).catch(() => saveRules(rulesPath, getDefaultRules()));
   createWindow();
@@ -1360,6 +1399,7 @@ ipcMain.handle('parse-epub-file', async (_, payload = {}) => {
     chapterMode,
     maxInlineImageBytes,
     ...readImageOptions(payload),
+    ...readResourceCacheOptions(),
     rules: await loadRules(rulesPath)
   });
   return {

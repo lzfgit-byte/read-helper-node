@@ -175,12 +175,30 @@ function openZip(input) {
 const IMAGE_MEDIA_TYPES = {
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',
+  '.jpe': 'image/jpeg',
   '.png': 'image/png',
   '.gif': 'image/gif',
   '.webp': 'image/webp',
   '.bmp': 'image/bmp',
   '.svg': 'image/svg+xml',
-  '.avif': 'image/avif'
+  '.avif': 'image/avif',
+  '.apng': 'image/apng',
+  '.tif': 'image/tiff',
+  '.tiff': 'image/tiff'
+};
+
+// 非图片资源（字体/媒体等）：同样参与内嵌预算与按需回退，但不计入正文图片统计
+const ASSET_MEDIA_TYPES = {
+  '.woff2': 'font/woff2',
+  '.woff': 'font/woff',
+  '.ttf': 'font/ttf',
+  '.otf': 'font/otf',
+  '.eot': 'application/vnd.ms-fontobject',
+  '.css': 'text/css',
+  '.mp3': 'audio/mpeg',
+  '.m4a': 'audio/mp4',
+  '.mp4': 'video/mp4',
+  '.webm': 'video/webm'
 };
 
 const XHTML_MEDIA_TYPES = new Set(['application/xhtml+xml', 'text/html', 'application/dtb']);
@@ -237,6 +255,44 @@ function stripTags(value) {
   return String(value == null ? '' : value).replace(/<[^>]*>/g, '');
 }
 
+// 占位图（1×1 透明图等）判定：这类 src 只是为了懒加载，真正地址在 data-src 一类属性里
+const IMAGE_PLACEHOLDER_LIMIT = 512;
+const LAZY_SRC_ATTRIBUTES = ['data-src', 'data-original', 'data-lazy-src', 'data-echo', 'data-url'];
+
+function isPlaceholderSrc(value) {
+  const src = String(value || '').trim();
+  if (!src) {
+    return true;
+  }
+  if (!/^data:/i.test(src)) {
+    return false;
+  }
+  const comma = src.indexOf(',');
+  return comma < 0 || src.length - comma - 1 <= IMAGE_PLACEHOLDER_LIMIT;
+}
+
+// 选取 <img> 真正要加载的地址：src 是占位（空 / 内联小图）时改用 data-src 等懒加载属性
+function pickImageHref(attrs) {
+  const localPath = (value) => {
+    const candidate = String(value || '').trim();
+    return candidate && !/^(data:|https?:|blob:|\/\/)/i.test(candidate) ? candidate : '';
+  };
+  const fromSrc = localPath(attrs.src);
+  if (fromSrc) {
+    return fromSrc;
+  }
+  if (isPlaceholderSrc(attrs.src)) {
+    for (const name of LAZY_SRC_ATTRIBUTES) {
+      const candidate = localPath(attrs[name]);
+      if (candidate) {
+        return candidate;
+      }
+    }
+  }
+  return attrs.src || attrs['xlink:href'] || attrs.href || '';
+}
+
+
 function normalizeText(value) {
   return String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
 }
@@ -282,7 +338,11 @@ function joinPath(baseDir, href) {
 
 function guessMediaType(href) {
   const ext = path.extname(String(href || '').split(/[?#]/)[0]).toLowerCase();
-  return IMAGE_MEDIA_TYPES[ext] || '';
+  return IMAGE_MEDIA_TYPES[ext] || ASSET_MEDIA_TYPES[ext] || '';
+}
+
+function isImageMediaType(mediaType) {
+  return /^image\//i.test(String(mediaType || ''));
 }
 
 function toDataUri(buffer, mediaType) {
@@ -500,10 +560,22 @@ function createResourceLoader(zip, options = {}) {
       : IMAGE_LIMITS.maxBytes,
     maxInlineImageBytes: Number.isFinite(options.maxInlineImageBytes) && options.maxInlineImageBytes >= 0
       ? options.maxInlineImageBytes
-      : IMAGE_LIMITS.maxInlineBytes
+      : IMAGE_LIMITS.maxInlineBytes,
+    // 字体等非图片资源默认不内嵌（改用按需地址），需要旧的“全内嵌”行为时传 true
+    inlineFonts: options.inlineFonts === true,
+    // 超预算资源写盘后返回地址的回调（未保存的解析；已保存的书籍用 imageUrlBase）
+    resourceCache: typeof options.resourceCache === 'function' ? options.resourceCache : null
   };
   // 内嵌预算：整本 base64 的总量与张数，超过就改用按需地址
-  const state = { bytes: 0, inlined: 0, skipped: 0, referenced: 0 };
+  const state = {
+    bytes: 0,
+    inlined: 0,
+    skipped: 0,
+    referenced: 0,
+    // 字体等非图片资源（不计入正文图片统计，但同样占用预算）
+    assetCount: 0,
+    assetBytes: 0
+  };
 
   function load(href, baseDir) {
     const key = `${baseDir}|${href}`;
@@ -522,26 +594,60 @@ function createResourceLoader(zip, options = {}) {
     return result;
   }
 
-  // 决定一张图片用 base64 还是按需地址；两者都不行时返回 null（调用方保留原标签）
+  // 超预算资源的按需地址：书籍内地址（已保存的书）或写盘缓存（未保存的解析）
+  function resourceUrl(resource) {
+    if (settings.imageUrlBase) {
+      return buildImageUrl(settings.imageUrlBase, resource.href);
+    }
+    if (settings.resourceCache) {
+      try {
+        return settings.resourceCache(resource) || null;
+      } catch (error) {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  // 决定一个资源用 base64 还是按需地址；两者都不行时返回 null（调用方保留原标签）
   function imageSrc(resource) {
-    if (!resource) {
+    if (!resource || settings.imageMode === 'none') {
       return null;
-    }
-    if (settings.imageMode === 'none') {
-      return null;
-    }
-    const onDemand = settings.imageUrlBase ? buildImageUrl(settings.imageUrlBase, resource.href) : null;
-    if (settings.imageMode === 'url') {
-      return onDemand;
     }
     const size = resource.data.length;
-    if (size > settings.maxImageBytes || state.bytes + size > settings.maxInlineImageBytes) {
-      // 单张过大或整本预算用尽：有按需地址就用地址，否则跳过（不再无限膨胀）
-      state.skipped += 1;
-      return onDemand;
+    const image = isImageMediaType(resource.mediaType);
+    // 字体等非图片资源默认不内嵌：同一字体常被多章引用，base64 会在每章重复一份
+    // （一本书能因此膨胀几十 MB），直接给按需地址；没有地址就保留原始 href。
+    if (!image && settings.inlineFonts !== true) {
+      const url = resourceUrl(resource);
+      if (url) {
+        state.assetCount += 1;
+        return url;
+      }
+      return null;
+    }
+    const oversize = size > settings.maxImageBytes;
+    const overBudget = state.bytes + size > settings.maxInlineImageBytes;
+    if (settings.imageMode === 'url' || oversize || overBudget) {
+      if (oversize || overBudget) {
+        state.skipped += 1;
+      }
+      const url = resourceUrl(resource);
+      if (url) {
+        if (!image) {
+          state.assetCount += 1;
+        }
+        return url;
+      }
+      // 既不能内嵌又没有按需地址：跳过（保留原始相对地址，不显示但不会爆内存）
+      return null;
     }
     state.bytes += size;
     state.inlined += 1;
+    if (!image) {
+      state.assetCount += 1;
+      state.assetBytes += size;
+    }
     return resource.dataUri;
   }
 
@@ -552,15 +658,18 @@ function createResourceLoader(zip, options = {}) {
     if (!resource || !src) {
       return null;
     }
-    state.referenced += 1;
-    if (Array.isArray(sink)) {
-      sink.push({
-        href: resource.href,
-        mediaType: resource.mediaType,
-        bytes: resource.data.length,
-        source: src.startsWith('data:') ? 'base64' : 'url',
-        ...meta
-      });
+    // 字体等资源不计入正文图片列表与图片张数
+    if (isImageMediaType(resource.mediaType)) {
+      state.referenced += 1;
+      if (Array.isArray(sink)) {
+        sink.push({
+          href: resource.href,
+          mediaType: resource.mediaType,
+          bytes: resource.data.length,
+          source: src.startsWith('data:') ? 'base64' : 'url',
+          ...meta
+        });
+      }
     }
     return { ...resource, src };
   }
@@ -946,11 +1055,11 @@ function inlineResources(documentHtml, baseDir, loader, options, images) {
     return `<img src="${resource.src}"${alt}${size ? ` ${size}` : ''} />`;
   }) : output;
 
-  // 3. <img> 与 SVG <image> 的资源地址改为 base64
+  // 3. <img> 与 SVG <image> 的资源地址改为 base64（或按需地址）
   if (inlineImages) {
     output = output.replace(/<(img|image)\b([^>]*?)\/?>/gi, (whole, tagName, rawAttrs) => {
       const attrs = parseAttributes(rawAttrs);
-      const href = attrs.src || attrs['xlink:href'] || attrs.href || '';
+      const href = pickImageHref(attrs);
       if (!href || /^(data:|https?:|blob:)/i.test(href)) {
         return whole;
       }
@@ -962,7 +1071,13 @@ function inlineResources(documentHtml, baseDir, loader, options, images) {
         const alt = attrs.alt ? ` alt="${attrs.alt}"` : ' alt=""';
         return `<img src="${resource.src}"${alt} />`;
       }
-      return whole.replace(/src\s*=\s*("([^"]*)"|'([^']*)')/i, `src="${resource.src}"`);
+      // 只替换真正的 src 属性：不要把 data-src / srcset 里的 "src=" 也当成目标
+      const replaced = whole.replace(/(\s)src\s*=\s*("([^"]*)"|'([^']*)')/i, (match, space) => `${space}src="${resource.src}"`);
+      if (replaced !== whole) {
+        return replaced;
+      }
+      // 只有 data-src（懒加载占位）时补一个 src，保证阅读器能显示
+      return whole.replace(/^<img\b/i, (match) => `${match} src="${resource.src}"`);
     });
   }
 
@@ -1080,6 +1195,10 @@ function parseEpubBuffer(input, options = {}) {
     maxInlineImageBytes: Number.isFinite(options.maxInlineImageBytes) && options.maxInlineImageBytes >= 0
       ? options.maxInlineImageBytes
       : IMAGE_LIMITS.maxInlineBytes,
+    // 字体等非图片资源默认不内嵌（同一字体被多章引用会重复几十份 base64）
+    inlineFonts: options.inlineFonts === true,
+    // 超预算资源写盘后返回地址（未保存的解析；已保存的书籍用 imageUrlBase）
+    resourceCache: typeof options.resourceCache === 'function' ? options.resourceCache : null,
     // 章节标题规则（与 TXT 解析共用）用于判断拆开的标题能否合并
     rules: options.rules && typeof options.rules === 'object' ? options.rules : getDefaultRules(),
     directoryEntries: Array.isArray(options.directoryEntries) ? options.directoryEntries : [],
@@ -1247,7 +1366,10 @@ function parseEpubBuffer(input, options = {}) {
       imageCount: allImages.length,
       inlinedImages: loader.state.inlined,
       imageBytes: loader.state.bytes,
-      skippedImages: loader.state.skipped
+      skippedImages: loader.state.skipped,
+      // 字体等非图片资源（同样占用内嵌预算）
+      assetCount: loader.state.assetCount,
+      assetBytes: loader.state.assetBytes
     }
   };
   // 封面原始字节仅供调用方（主进程）写文件或按 URL 提供，不参与 JSON 序列化

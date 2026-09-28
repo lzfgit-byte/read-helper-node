@@ -78,6 +78,8 @@ function createZip(files) {
 
 const PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==';
 const PNG_BUFFER = Buffer.from(PNG_BASE64, 'base64');
+// 1×1 透明 GIF：常见的懒加载占位图
+const PLACEHOLDER_GIF = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
 const COVER_BUFFER = Buffer.from(`cover-${PNG_BASE64}`, 'base64');
 
 const CONTAINER_XML = `<?xml version="1.0" encoding="UTF-8"?>
@@ -159,6 +161,71 @@ function createSampleEpub(overrides = {}) {
   ];
   return createZip(overrides.files || files);
 }
+
+// 微信读书等导出：真正要显示的地址在 data-src（或 src 是 1×1 占位图）时，
+// base64 必须写进真正的 src，否则阅读器上图片不显示
+function createLazyImageEpub() {
+  const chapter = `<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <body>
+    <h1>作者简介</h1>
+    <div class="qrbodypic">
+      <img alt="" data-ratio="1.363" data-src="https://example.com/remote.jpg" src="images/pic.png" class="calibre3"/>
+    </div>
+    <p><img src="${PLACEHOLDER_GIF}" data-src="images/pic.png" alt="占位图"/></p>
+    <p><img data-src="images/pic.png" alt="只有 data-src"/></p>
+  </body>
+</html>`;
+  return createZip([
+    { name: 'mimetype', data: 'application/epub+zip' },
+    { name: 'META-INF/container.xml', data: CONTAINER_XML, compress: true },
+    {
+      name: 'OEBPS/content.opf',
+      data: `<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="bookid">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>懒加载图片</dc:title>
+    <dc:identifier id="bookid">urn:uuid:lazy</dc:identifier>
+  </metadata>
+  <manifest>
+    <item id="ch1" href="chapter1.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine><itemref idref="ch1"/></spine>
+</package>`,
+      compress: true
+    },
+    { name: 'OEBPS/images/pic.png', data: PNG_BUFFER },
+    { name: 'OEBPS/chapter1.xhtml', data: chapter, compress: true }
+  ]);
+}
+
+test('writes the inlined image into the real src, not into data-src', () => {
+  const result = parseEpubBuffer(createLazyImageEpub(), { imageMode: 'url', imageUrlBase: '/epub-image?id=1' });
+  const [chapter] = result.chapters;
+  const tags = chapter.content.match(/<img\b[^>]*>/gi) || [];
+
+  assert.equal(tags.length, 3, `三个 img（实际 ${tags.length}）`);
+  // 1. 原样是 data-src + src，data-src 保持远程地址不变，src 换成按需地址
+  assert.ok(tags[0].includes('data-src="https://example.com/remote.jpg"'), `data-src 不该被改写：${tags[0]}`);
+  assert.ok(tags[0].includes('src="/epub-image?id=1&href=OEBPS%2Fimages%2Fpic.png"'), `src 应被改写：${tags[0]}`);
+  // 2. src 是占位图时，用 data-src 指向的本地图片
+  assert.ok(!tags[1].includes('src="data:image/gif'), `占位图应被替换：${tags[1]}`);
+  assert.ok(tags[1].includes('src="/epub-image?id=1&href=OEBPS%2Fimages%2Fpic.png"'), `占位图替换：${tags[1]}`);
+  // 3. 只有 data-src 时补出 src
+  assert.ok(tags[2].includes('src="/epub-image?id=1&href=OEBPS%2Fimages%2Fpic.png"'), `补出 src：${tags[2]}`);
+});
+
+test('inlines lazy loaded images as base64 when within budget', () => {
+  const result = parseEpubBuffer(createLazyImageEpub());
+  const tags = result.chapters[0].content.match(/<img\b[^>]*>/gi) || [];
+  const payload = PNG_BUFFER.toString('base64');
+
+  assert.equal(tags.length, 3);
+  assert.ok(tags.every((tag) => tag.includes(`src="data:image/png;base64,${payload}"`)), '三张图都以 base64 内嵌');
+  assert.ok(tags[0].includes('data-src="https://example.com/remote.jpg"'), 'data-src 保持原样');
+  assert.equal(result.stats.imageCount, 1, '同一张图只记一次（去重后的引用数）');
+  assert.equal(result.stats.inlinedImages, 3, '三处引用都做了内嵌');
+});
 
 test('parses epub metadata and spine chapters', () => {
   const result = parseEpubBuffer(createSampleEpub());

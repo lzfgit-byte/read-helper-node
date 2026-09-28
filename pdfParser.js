@@ -1282,6 +1282,8 @@ function parsePdfBuffer(input, options = {}) {
     maxImageBytes: Number.isFinite(options.maxImageBytes) && options.maxImageBytes > 0
       ? options.maxImageBytes
       : IMAGE_LIMITS.maxBytes,
+    // 超预算图片写盘后返回地址的回调（未保存的解析；已保存的书籍用 imageUrlBase）
+    resourceCache: typeof options.resourceCache === 'function' ? options.resourceCache : null,
     // 分章方式：auto（有书签用书签，否则按页）/ page（强制按页）
     chapterMode: options.chapterMode === 'page' ? 'page' : 'auto',
     maxPages: Number.isFinite(options.maxPages) && options.maxPages > 0 ? options.maxPages : Infinity,
@@ -1391,6 +1393,17 @@ function parsePdfBuffer(input, options = {}) {
           continue;
         }
         if (imageState.bytes + image.data.length > settings.maxInlineImageBytes) {
+          // 超出内嵌预算：能给按需地址就给，否则跳过（不再无限膨胀）
+          const cachedUrl = settings.resourceCache
+            ? settings.resourceCache({ href: `page:${page.index + 1}/${block.name}`, mediaType: image.mediaType, data: image.data })
+            : '';
+          if (cachedUrl) {
+            imageState.emitted += 1;
+            const meta = { page: page.index + 1, name: block.name, url: cachedUrl, mediaType: image.mediaType };
+            chapterImages.push(meta);
+            parts.push(toUrlImageHtml(cachedUrl));
+            continue;
+          }
           imageState.skipped += 1;
           continue;
         }
