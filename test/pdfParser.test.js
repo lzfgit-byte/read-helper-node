@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const zlib = require('zlib');
-const { parsePdfBuffer } = require('../pdfParser');
+const { parsePdfBuffer, extractPageImage } = require('../pdfParser');
 const { getDefaultRules } = require('../parseRules');
 
 // --- 极简 PDF 生成（仅测试用）：不带 xref，解析器本身是容错扫描 ---
@@ -481,4 +481,70 @@ test('inlines a repeated image only once per chapter', () => {
 
   assert.equal(result.stats.imageCount, 1, '同一章里同一张图只嵌一次');
   assert.equal(result.chapters[0].content.split('<img').length - 1, 1);
+});
+
+test('emits page image urls instead of base64 when imageUrlBase is set', () => {
+  const result = parsePdfBuffer(buildIllustratedPdf(), { imageUrlBase: '/pdf-page?id=5' });
+  const chapter = result.chapters[0];
+
+  assert.equal(result.stats.imageMode, 'url');
+  assert.equal(result.stats.imageCount, 1, '图片数量照常统计');
+  assert.equal(result.stats.inlinedImages, 0, '没有 base64');
+  assert.equal(result.stats.imageBytes, 0);
+  assert.ok(!chapter.content.includes('data:image'), '章节里没有 base64');
+  assert.match(chapter.content, /<img src="\/pdf-page\?id=5&page=1&name=Im1"/);
+  assert.equal(chapter.images[0].url, '/pdf-page?id=5&page=1&name=Im1');
+  assert.equal(chapter.images[0].page, 1);
+  assert.equal(chapter.images[0].mediaType, 'image/jpeg', '不解码也能给出 mime');
+  // URL 模式下章节整体很小（不再随页面图片膨胀）
+  assert.ok(chapter.content.length < 1000, `章节长度 ${chapter.content.length}`);
+});
+
+test('imageMode none keeps text only', () => {
+  const result = parsePdfBuffer(buildIllustratedPdf(), { imageMode: 'none' });
+
+  assert.equal(result.stats.imageMode, 'none');
+  assert.equal(result.stats.imageCount, 0);
+  assert.ok(!result.chapters[0].content.includes('<img'));
+  assert.ok(result.chapters[0].content.includes('Before image paragraph'));
+});
+
+test('skips absurd image dimensions instead of allocating memory', () => {
+  const pdf = buildPdf({
+    objects: [
+      { body: '<< /Type /Catalog /Pages 2 0 R >>' },
+      { body: '<< /Type /Pages /Kids [3 0 R] /Count 1 >>' },
+      {
+        body: '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] '
+          + '/Resources << /Font << /F1 5 0 R >> /XObject << /Im1 6 0 R >> >> /Contents 4 0 R >>'
+      },
+      { body: streamBody('', `${textOperator('Huge image guard')}\nq 200 0 0 120 72 400 cm /Im1 Do Q`) },
+      { body: '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>' },
+      {
+        // 1 亿像素、数据却只有几个字节：直接跳过，不应该尝试分配
+        body: streamBody(
+          '/Type /XObject /Subtype /Image /Width 10000 /Height 10000 /ColorSpace /DeviceRGB '
+            + '/BitsPerComponent 8 /Filter /FlateDecode',
+          zlib.deflateSync(Buffer.from([1, 2, 3, 4]))
+        )
+      }
+    ],
+    root: 1
+  });
+  const result = parsePdfBuffer(pdf);
+
+  assert.equal(result.stats.imageCount, 0);
+  assert.equal(result.stats.skippedImages, 1, '超大图被跳过');
+  assert.ok(result.chapters[0].content.includes('Huge image guard'), '正文仍然保留');
+});
+
+test('extracts a single page image for on demand delivery', () => {
+  const pdf = buildIllustratedPdf();
+  const image = extractPageImage(pdf, 1, 'Im1');
+
+  assert.ok(image, '能取出第 1 页图片');
+  assert.equal(image.mediaType, 'image/jpeg');
+  assert.equal(image.data[0], 0xff);
+  assert.equal(extractPageImage(pdf, 9, 'Im1'), null, '不存在的页返回 null');
+  assert.throws(() => extractPageImage(Buffer.from('nope'), 1, 'Im1'), /PDF/);
 });

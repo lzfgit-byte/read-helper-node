@@ -6,8 +6,8 @@ const express = require('express');
 const multer = require('multer');
 const { createDatabase } = require('./db');
 const { parseTextToChapters, normalizeDirectoryEntries, loadRules, saveRules, getDefaultRules } = require('./parseRules');
-const { parseEpubBuffer } = require('./epubParser');
-const { parsePdfBuffer } = require('./pdfParser');
+const { parseEpubBuffer, readEpubResource } = require('./epubParser');
+const { parsePdfBuffer, extractPageImage } = require('./pdfParser');
 const { ensureDir, saveBookFile, saveBookBuffer, readHtmlList } = require('./fileService');
 
 const appDataDir = path.join(app.getPath('userData'), 'reader-helper');
@@ -23,6 +23,10 @@ const PDF_EXTENSION = '.pdf';
 const EBOOK_EXTENSIONS = [EPUB_EXTENSION, PDF_EXTENSION];
 // 已保存书籍的封面由该接口从原文件里实时提取
 const BOOK_COVER_PATH = '/book-cover';
+// PDF 正文图片按需提供（扫描版整页图不走 base64，避免主进程内存被撑爆）
+const PDF_PAGE_PATH = '/pdf-page';
+// EPUB 正文图片按需提供（图片多/体积大的书籍走这里，不把整本 base64 塞进章节）
+const EPUB_IMAGE_PATH = '/epub-image';
 // 仅解析（未保存）时，封面先落到缓存目录再通过静态地址提供
 const EPUB_COVER_CACHE_PATH = '/epub-covers';
 const COVER_EXTENSIONS = {
@@ -92,11 +96,14 @@ function buildEbookSummary(parsed, coverUrl = '', kind = '') {
       ? '扫描版 PDF：没有文本层，正文以内嵌整页图片提供'
       : '扫描版 PDF：没有文本层，未能提取正文');
   }
-  if (stats.skippedImages) {
-    warnings.push(`有 ${stats.skippedImages} 张图片未内嵌（超出 maxInlineImageBytes 限制）`);
+  const imageMode = stats.imageMode || 'inline';
+  if (stats.skippedImages && !stats.inlinedImages && !stats.imageCount) {
+    warnings.push(`有 ${stats.skippedImages} 张图片未内嵌（图片过大或超出内嵌总量上限）`);
+  } else if (stats.skippedImages) {
+    warnings.push(`有 ${stats.skippedImages} 张图片未内嵌（已改用按需加载或已跳过）`);
   }
-  if (stats.imageBytes > 20 * 1024 * 1024) {
-    warnings.push(`已在正文内嵌约 ${Math.round(stats.imageBytes / 1024 / 1024)} MB 图片，批量解析接口响应会很大，可传 inlineImages=false 只取文字`);
+  if (stats.inlinedImages > 0 && stats.imageBytes > 12 * 1024 * 1024) {
+    warnings.push(`已在正文内嵌约 ${Math.round(stats.imageBytes / 1024 / 1024)} MB 图片，建议改用按需加载（已保存的书籍默认按需加载）`);
   }
   return {
     title: parsed.title || '',
@@ -112,6 +119,9 @@ function buildEbookSummary(parsed, coverUrl = '', kind = '') {
     toc: parsed.toc || [],
     chapterCount: parsed.chapters.length,
     imageCount: stats.imageCount ? stats.imageCount : 0,
+    inlinedImages: stats.inlinedImages ? stats.inlinedImages : 0,
+    skippedImages: stats.skippedImages ? stats.skippedImages : 0,
+    imageMode,
     format: kind || (parsed.pageCount ? 'pdf' : 'epub'),
     pageCount: parsed.pageCount || 0,
     outlineCount: parsed.outlineCount || 0,
@@ -192,6 +202,69 @@ function extractEbookCover(book) {
   return cover;
 }
 
+// EPUB/Pdf 正文图片：按需提取并缓存少量（浏览到哪一页/哪张图就解码哪一张）
+const pdfPageCache = new Map();
+const PDF_PAGE_CACHE_LIMIT = 32;
+const epubImageCache = new Map();
+const EPUB_IMAGE_CACHE_LIMIT = 64;
+
+function extractPdfPageImage(book, pageNumber, name) {
+  let stats = null;
+  try {
+    stats = fs.statSync(book.storedPath);
+  } catch {
+    return null;
+  }
+  const key = `${book.storedPath}|${stats.mtimeMs}|${pageNumber}|${name || ''}`;
+  if (pdfPageCache.has(key)) {
+    const cached = pdfPageCache.get(key);
+    pdfPageCache.delete(key);
+    pdfPageCache.set(key, cached);
+    return cached;
+  }
+  let image = null;
+  try {
+    image = extractPageImage(fs.readFileSync(book.storedPath), pageNumber, name);
+  } catch (error) {
+    console.warn(`[pdf] 页面图片提取失败 ${book.storedPath} 第 ${pageNumber} 页：${error.message}`);
+    image = null;
+  }
+  pdfPageCache.set(key, image);
+  while (pdfPageCache.size > PDF_PAGE_CACHE_LIMIT) {
+    pdfPageCache.delete(pdfPageCache.keys().next().value);
+  }
+  return image;
+}
+
+function extractEpubImage(book, href) {
+  let stats = null;
+  try {
+    stats = fs.statSync(book.storedPath);
+  } catch {
+    return null;
+  }
+  const key = `${book.storedPath}|${stats.mtimeMs}|${href}`;
+  if (epubImageCache.has(key)) {
+    const cached = epubImageCache.get(key);
+    epubImageCache.delete(key);
+    epubImageCache.set(key, cached);
+    return cached;
+  }
+  let image = null;
+  try {
+    image = readEpubResource(fs.readFileSync(book.storedPath), href);
+  } catch (error) {
+    console.warn(`[epub] 图片提取失败 ${book.storedPath} ${href}：${error.message}`);
+    image = null;
+  }
+  epubImageCache.set(key, image);
+  while (epubImageCache.size > EPUB_IMAGE_CACHE_LIMIT) {
+    epubImageCache.delete(epubImageCache.keys().next().value);
+  }
+  return image;
+}
+
+// 上传电子书时自动补全书名/作者/简介/目录项，并标记是否包含封面
 // 上传电子书时自动补全书名/作者/简介/目录项，并标记是否包含封面
 function enrichBookFromEbook(sourcePath, payload = {}, rules) {
   const kind = ebookKindOf(sourcePath);
@@ -237,6 +310,15 @@ function resolveUpdatedCover(book, incomingCoverImg) {
   return isEbookBook(book) ? (book.coverImg || '') : '';
 }
 
+// 解析接口传入的图片模式/按需地址需要先做安全校验（会写进返回的章节 HTML 里）
+function readImageOptions(source = {}) {
+  const mode = ['inline', 'url', 'none'].includes(source.imageMode) ? source.imageMode : undefined;
+  const base = typeof source.imageUrlBase === 'string' && /^\/[\w\-./]{0,200}$/.test(source.imageUrlBase)
+    ? source.imageUrlBase
+    : undefined;
+  return { imageMode: mode, imageUrlBase: base };
+}
+
 // 按书籍类型选择解析方式：EPUB/PDF 走各自解析器，TXT 走章节规则解析。
 // options.inlineImages=false 时跳过正文图片内嵌（只看章节标题时能省下大量 base64）
 function loadBookChapters(book, rules, directoryEntries, options = {}) {
@@ -248,6 +330,18 @@ function loadBookChapters(book, rules, directoryEntries, options = {}) {
       includeText: options.includeText !== false,
       inlineImages: options.inlineImages !== false
     };
+    if (kind === 'pdf') {
+      // 已保存的 PDF：正文图片改为 /pdf-page 按需加载，章节 HTML 保持很小
+      parseOptions.imageMode = options.inlineImages === false ? 'none' : 'url';
+      parseOptions.imageUrlBase = `${PDF_PAGE_PATH}?id=${book.id}`;
+    } else {
+      // 已保存的 EPUB：图片仍优先 base64（保持自包含），但超过内嵌预算的会用
+      // /epub-image 按需提供，避免图片很多的书籍把内存拉爆
+      parseOptions.imageUrlBase = `${EPUB_IMAGE_PATH}?id=${book.id}`;
+      if (options.inlineImages === false) {
+        parseOptions.imageMode = 'none';
+      }
+    }
     const parsed = kind === 'pdf'
       ? parsePdfBuffer(fs.readFileSync(book.storedPath), parseOptions)
       : parseEpubBuffer(fs.readFileSync(book.storedPath), parseOptions);
@@ -393,6 +487,47 @@ function startStaticServer(openBrowser = false) {
     return res.status(404).send('封面未找到');
   });
 
+  // 已保存电子书的正文图片（EPUB）：从压缩包里按需取图，避免整本 base64 进章节
+  appServer.get(EPUB_IMAGE_PATH, async (req, res) => {
+    const bookId = Number(req.query.id);
+    const href = typeof req.query.href === 'string' ? req.query.href : '';
+    if (!Number.isFinite(bookId) || !href) {
+      return res.status(400).send('id 与 href 不能为空');
+    }
+    const book = database.getBookById(bookId);
+    if (!book || bookEbookKind(book) !== 'epub' || !book.storedPath || !fs.existsSync(book.storedPath)) {
+      return res.status(404).send('未找到该 EPUB 书籍');
+    }
+    const image = extractEpubImage(book, href);
+    if (!image) {
+      return res.status(404).send('该图片不存在');
+    }
+    res.set('Content-Type', image.mediaType || 'application/octet-stream');
+    res.set('Cache-Control', 'public, max-age=86400');
+    return res.send(image.data);
+  });
+
+  // 已保存电子书的正文图片（PDF）：按页解码后返回，避免把整本扫描图 base64 内联进章节
+  appServer.get(PDF_PAGE_PATH, async (req, res) => {
+    const bookId = Number(req.query.id);
+    const pageNumber = Number(req.query.page);
+    const name = typeof req.query.name === 'string' ? req.query.name : '';
+    if (!Number.isFinite(bookId) || !Number.isFinite(pageNumber) || pageNumber < 1) {
+      return res.status(400).send('id 与 page 不能为空');
+    }
+    const book = database.getBookById(bookId);
+    if (!book || bookEbookKind(book) !== 'pdf' || !book.storedPath || !fs.existsSync(book.storedPath)) {
+      return res.status(404).send('未找到该 PDF 书籍');
+    }
+    const image = extractPdfPageImage(book, pageNumber, name);
+    if (!image) {
+      return res.status(404).send('该页没有可用的图片');
+    }
+    res.set('Content-Type', image.mediaType || 'application/octet-stream');
+    res.set('Cache-Control', 'public, max-age=86400');
+    return res.send(image.data);
+  });
+
   // 封面图片代理：由后台请求外部封面地址再返回给前端，规避防盗链导致的封面无法显示。
   // 注册在日志中间件之前，避免把图片二进制写入 API 日志。
   appServer.get(COVER_PROXY_PATH, async (req, res) => {
@@ -457,7 +592,13 @@ function startStaticServer(openBrowser = false) {
       notesToEnd: body.notesToEnd !== 'false' && body.notesToEnd !== false,
       notesTitle: typeof body.notesTitle === 'string' ? body.notesTitle : undefined,
       // PDF 专用：chapterMode=page 时强制按页分章
-      chapterMode: body.chapterMode === 'page' ? 'page' : 'auto'
+      chapterMode: body.chapterMode === 'page' ? 'page' : 'auto',
+      // PDF 专用：限制正文内嵌图片的原始字节总量（0 表示不内嵌任何图片）
+      maxInlineImageBytes: Number.isFinite(Number(body.maxInlineImageBytes)) && body.maxInlineImageBytes !== ''
+        ? Number(body.maxInlineImageBytes)
+        : undefined,
+      // PDF 专用：inline=base64 内嵌 / url=按需地址
+      ...readImageOptions(body)
     };
   }
 
@@ -1198,7 +1339,10 @@ ipcMain.handle('upload-book', async (_, payload) => {
 });
 
 ipcMain.handle('parse-epub-file', async (_, payload = {}) => {
-  const { filePath, inlineImages, inlineStyles, includeText, unwrapImages, blockImages, notesToEnd, notesTitle, maxChapters, chapterMode } = payload;
+  const {
+    filePath, inlineImages, inlineStyles, includeText, unwrapImages, blockImages,
+    notesToEnd, notesTitle, maxChapters, chapterMode, maxInlineImageBytes
+  } = payload;
   if (!filePath || !fs.existsSync(filePath)) {
     throw new Error('未找到电子书文件');
   }
@@ -1214,6 +1358,8 @@ ipcMain.handle('parse-epub-file', async (_, payload = {}) => {
     notesTitle,
     maxChapters,
     chapterMode,
+    maxInlineImageBytes,
+    ...readImageOptions(payload),
     rules: await loadRules(rulesPath)
   });
   return {

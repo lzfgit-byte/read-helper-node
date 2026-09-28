@@ -748,10 +748,19 @@
       const chapters = payload.chapters || [];
       const stats = payload.stats || {};
       const isPdf = (payload.format || book.format) === 'pdf';
+      const imageCount = stats.imageCount || book.imageCount || 0;
+      const inlined = stats.inlinedImages || book.inlinedImages || 0;
+      const onDemandImages = stats.skippedImages || book.skippedImages || 0;
+      const imageMode = stats.imageMode || book.imageMode;
+      const imageLabel = imageMode === 'url'
+        ? `图片 ${imageCount} 张（按需加载）`
+        : (onDemandImages > 0
+          ? `图片 ${imageCount} 张（内嵌 ${inlined} 张 + 按需 ${onDemandImages} 张）`
+          : `内嵌图片 ${inlined || imageCount} 张`);
       const info = [
         `章节 ${chapters.length}`,
         isPdf ? `页数 ${book.pageCount || stats.pageCount || 0}` : '',
-        `内嵌图片 ${stats.imageCount || 0} 张`,
+        imageLabel,
         payload.size,
         book.language
       ].filter(Boolean).join(' · ');
@@ -798,7 +807,12 @@
         lastEpubResult = result;
         renderEpubResult(result);
         const warnings = (result.book && result.book.warnings) || [];
-        status.innerText = `解析成功：共 ${result.chapters.length} 章，内嵌图片 ${(result.stats && result.stats.imageCount) || 0} 张（base64）`
+        const stats = result.stats || {};
+        const imageInfo = stats.imageMode === 'url'
+          ? `图片 ${stats.imageCount || 0} 张（按需加载）`
+          : `内嵌图片 ${stats.inlinedImages || 0} 张（base64）`
+            + (stats.skippedImages ? `，另有 ${stats.skippedImages} 张改用按需加载/跳过` : '');
+        status.innerText = `解析成功：共 ${result.chapters.length} 章，${imageInfo}`
           + (warnings.length ? `；${warnings.join('；')}` : '');
       } catch (error) {
         lastEpubResult = null;

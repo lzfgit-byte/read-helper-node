@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const zlib = require('zlib');
-const { parseEpubBuffer } = require('../epubParser');
+const { parseEpubBuffer, readEpubResource } = require('../epubParser');
 const { getDefaultRules } = require('../parseRules');
 
 // --- 极简 ZIP 打包（仅测试用），支持 store 与 deflate 两种方式 ---
@@ -243,6 +243,63 @@ test('keeps original urls when inlineImages is disabled', () => {
   assert.equal(result.images.length, 0);
   assert.equal(first.images.length, 0);
   assert.equal('text' in first, false);
+});
+
+test('falls back to on demand urls when the inline budget is exhausted', () => {
+  const epub = createSampleEpub();
+  // 预算 1 字节：两张图都会超，但给了按需地址 → 不内嵌，改用 /epub-image
+  const result = parseEpubBuffer(epub, {
+    imageUrlBase: '/epub-image?id=7',
+    maxInlineImageBytes: 1,
+    inlineStyles: false
+  });
+  const [first] = result.chapters;
+
+  assert.equal(result.stats.imageMode, 'inline', '默认仍是内嵌模式');
+  assert.equal(result.stats.inlinedImages, 0);
+  assert.equal(result.stats.skippedImages, 2, `超预算张数（实际 ${result.stats.skippedImages}）`);
+  assert.equal(result.stats.imageBytes, 0);
+  assert.ok(!first.content.includes('base64,'), '没有 base64');
+  assert.ok(
+    first.content.includes('src="/epub-image?id=7&href=OEBPS%2Fimages%2Fpic.png"'),
+    `按需地址（实际片段：${(first.content.match(/src="[^"]*"/) || [])[0]}）`
+  );
+  assert.equal(first.images.length, 2, 'css 背景图也走按需');
+  assert.equal(first.images[0].source, 'url');
+  assert.ok(first.images[0].bytes > 0, '仍然报出真实字节数');
+});
+
+test('skips oversized images when there is no on demand base', () => {
+  const result = parseEpubBuffer(createSampleEpub(), { maxImageBytes: 10, inlineStyles: false });
+  const [first] = result.chapters;
+
+  assert.equal(result.stats.inlinedImages, 0);
+  assert.equal(result.stats.skippedImages, 2);
+  assert.ok(!first.content.includes('base64,'), '不会退化回 base64');
+  assert.ok(first.content.includes('src="images/pic.png"'), '保留原始相对地址，标签不丢');
+});
+
+test('imageMode url serves every image on demand', () => {
+  const result = parseEpubBuffer(createSampleEpub(), { imageMode: 'url', imageUrlBase: '/epub-image?id=3' });
+  const [first] = result.chapters;
+
+  assert.equal(result.stats.imageMode, 'url');
+  assert.equal(result.stats.inlinedImages, 0);
+  assert.equal(result.stats.imageCount, 1, '两张引用同一张图时只记一次');
+  assert.ok(!first.content.includes('base64,'));
+  assert.ok(first.content.includes('/epub-image?id=3&href=OEBPS%2Fimages%2Fpic.png'));
+  assert.equal(result.images[0].source, 'url');
+});
+
+test('readEpubResource reads a single file and rejects traversal', () => {
+  const epub = createSampleEpub();
+  const resource = readEpubResource(epub, 'OEBPS/images/pic.png');
+
+  assert.ok(resource);
+  assert.equal(resource.mediaType, 'image/png');
+  assert.ok(resource.data.equals(PNG_BUFFER));
+  assert.equal(readEpubResource(epub, '../../etc/passwd'), null, '不允许路径穿越');
+  assert.equal(readEpubResource(epub, 'OEBPS/missing.png'), null);
 });
 
 test('resolves relative image paths and svg wrappers', () => {

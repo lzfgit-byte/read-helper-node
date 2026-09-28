@@ -531,7 +531,7 @@ function decodeAscii85(data) {
 }
 
 // 返回 { data, imageMediaType }；不支持的解码返回 null
-function decodeStreamInfo(streamObject, objects) {
+function decodeStreamInfo(streamObject, objects, limits = IMAGE_LIMITS) {
   const raw = streamObject.raw || Buffer.alloc(0);
   const dict = streamObject;
   let data = Buffer.from(raw);
@@ -541,11 +541,12 @@ function decodeStreamInfo(streamObject, objects) {
     const filter = filters[index];
     const parms = resolveDict(objects, parameters[index]);
     if (filter === 'FlateDecode' || filter === 'Fl') {
+      // maxOutputLength 防止解压炸弹把堆拉爆（异常时直接放弃这张图）
       try {
-        data = zlib.inflateSync(data);
+        data = zlib.inflateSync(data, { maxOutputLength: limits.maxInflatedBytes });
       } catch {
         try {
-          data = zlib.inflateRawSync(data);
+          data = zlib.inflateRawSync(data, { maxOutputLength: limits.maxInflatedBytes });
         } catch {
           return null;
         }
@@ -573,8 +574,8 @@ function decodeStreamInfo(streamObject, objects) {
   return { data };
 }
 
-function decodeStream(streamObject, objects) {
-  const info = decodeStreamInfo(streamObject, objects);
+function decodeStream(streamObject, objects, limits) {
+  const info = decodeStreamInfo(streamObject, objects, limits);
   return info ? info.data : null;
 }
 
@@ -1127,13 +1128,31 @@ function readOutlines(objects) {
   return entries;
 }
 
+// 单张图片/单个流的安全上限：避免异常尺寸或解压炸弹把内存拉爆
+const IMAGE_LIMITS = {
+  // 单个流解压后的最大字节数
+  maxInflatedBytes: 64 * 1024 * 1024,
+  // 单张图片的像素数（宽 × 高）上限
+  maxPixels: 32 * 1024 * 1024,
+  // 单张图片的原始字节上限
+  maxBytes: 8 * 1024 * 1024
+};
+
 // 图片 XObject → { mediaType, data }：DCT/JPX 原样输出，其余像素重新编码为 PNG
-function decodeImageObject(xobject, objects) {
+function decodeImageObject(xobject, objects, limits = IMAGE_LIMITS) {
   if (!isStream(xobject) || nameValue(xobject.Subtype) !== 'Image') {
     return null;
   }
-  const decoded = decodeStreamInfo(xobject, objects);
+  const width = Number(xobject.Width) || 0;
+  const height = Number(xobject.Height) || 0;
+  if (width <= 0 || height <= 0 || width * height > limits.maxPixels) {
+    return null;
+  }
+  const decoded = decodeStreamInfo(xobject, objects, limits);
   if (!decoded) {
+    return null;
+  }
+  if (decoded.data.length > limits.maxBytes) {
     return null;
   }
   if (decoded.imageMediaType) {
@@ -1143,29 +1162,24 @@ function decodeImageObject(xobject, objects) {
   if (bitsPerComponent !== 8) {
     return null;
   }
-  const width = Number(xobject.Width) || 0;
-  const height = Number(xobject.Height) || 0;
-  if (width <= 0 || height <= 0) {
-    return null;
-  }
   const colorSpace = nameValue(xobject.ColorSpace) ||
     nameValue(toArray(resolveRef(objects, xobject.ColorSpace))[0]);
   const pixels = decoded.data;
   try {
     if (colorSpace === 'DeviceRGB' || colorSpace === 'CalRGB') {
-      if (pixels.length < width * height * 3) {
+      if (pixels.length < width * height * 3 || width * height * 3 > limits.maxBytes) {
         return null;
       }
       return { mediaType: 'image/png', data: encodePng(width, height, 2, pixels) };
     }
     if (colorSpace === 'DeviceGray' || colorSpace === 'CalGray') {
-      if (pixels.length < width * height) {
+      if (pixels.length < width * height || width * height > limits.maxBytes) {
         return null;
       }
       return { mediaType: 'image/png', data: encodePng(width, height, 0, pixels) };
     }
     if (colorSpace === 'DeviceCMYK') {
-      if (pixels.length < width * height * 4) {
+      if (pixels.length < width * height * 4 || width * height * 3 > limits.maxBytes) {
         return null;
       }
       const rgb = Buffer.alloc(width * height * 3);
@@ -1186,10 +1200,37 @@ function decodeImageObject(xobject, objects) {
   return null;
 }
 
+// 不解码，只根据 Filter 推断 mime（按需出图时用作 content-type）
+function imageFilterMediaType(xobject, objects) {
+  const filter = nameValue(xobject.Filter) || nameValue(toArray(resolveRef(objects, xobject.Filter))[0]);
+  if (filter === 'DCTDecode' || filter === 'DCT') {
+    return 'image/jpeg';
+  }
+  if (filter === 'JPXDecode') {
+    return 'image/jp2';
+  }
+  if (filter === 'FlateDecode' || filter === 'Fl') {
+    return 'image/png';
+  }
+  return 'application/octet-stream';
+}
+
 // 正文图片按 EPUB 的样式输出：块级 + 前后 <br/> 分隔
 function toInlineImageHtml(image) {
   return `<br/><img src="data:${image.mediaType};base64,${image.data.toString('base64')}"`
     + ' style="display:block;max-width:100%;height:auto;" /><br/>';
+}
+
+// 按需出图：正文只放一个地址，图片由 /pdf-page 逐页提供（扫描版不会撑爆内存）
+function buildPageImageUrl(base, pageNumber, name) {
+  // base 来自调用方，做一次转义防护，避免拼出越界的 HTML 属性
+  const safeBase = String(base || '').replace(/["<>]/g, '');
+  const separator = safeBase.includes('?') ? '&' : '?';
+  return `${safeBase}${separator}page=${pageNumber}&name=${encodeURIComponent(name)}`;
+}
+
+function toUrlImageHtml(url) {
+  return `<br/><img src="${url}" style="display:block;max-width:100%;height:auto;" /><br/>`;
 }
 
 // 首页图片作为封面（DCT → jpeg，Flate → PNG）
@@ -1228,12 +1269,19 @@ function parsePdfBuffer(input, options = {}) {
     includeText: options.includeText !== false,
     includeChapters: options.includeChapters !== false,
     paragraphMerge: options.paragraphMerge !== false,
-    // 正文图片内嵌为 base64（与 EPUB 一致，默认开启）
-    inlineImages: options.inlineImages !== false,
-    // 整本内嵌图片的原始字节上限（0 表示不限），超出后跳过后面的图片
-    maxInlineImageBytes: Number.isFinite(options.maxInlineImageBytes) && options.maxInlineImageBytes > 0
+    // 正文图片：inline=base64 内嵌 / url=按需地址 / none=不出图
+    // 默认：传了 imageUrlBase 就用 url（扫描版几百页不会把堆撑爆），否则内嵌
+    imageMode: ['inline', 'url', 'none'].includes(options.imageMode)
+      ? options.imageMode
+      : (options.imageUrlBase ? 'url' : (options.inlineImages === false ? 'none' : 'inline')),
+    imageUrlBase: typeof options.imageUrlBase === 'string' ? options.imageUrlBase : '',
+    // 整本内嵌图片的原始字节上限（默认 24 MB，防止一次性生成几十 MB 的 base64）
+    maxInlineImageBytes: Number.isFinite(options.maxInlineImageBytes) && options.maxInlineImageBytes >= 0
       ? options.maxInlineImageBytes
-      : 0,
+      : 24 * 1024 * 1024,
+    maxImageBytes: Number.isFinite(options.maxImageBytes) && options.maxImageBytes > 0
+      ? options.maxImageBytes
+      : IMAGE_LIMITS.maxBytes,
     // 分章方式：auto（有书签用书签，否则按页）/ page（强制按页）
     chapterMode: options.chapterMode === 'page' ? 'page' : 'auto',
     maxPages: Number.isFinite(options.maxPages) && options.maxPages > 0 ? options.maxPages : Infinity,
@@ -1241,6 +1289,12 @@ function parsePdfBuffer(input, options = {}) {
     rules: options.rules && typeof options.rules === 'object' ? options.rules : getDefaultRules(),
     directoryEntries: Array.isArray(options.directoryEntries) ? options.directoryEntries : []
   };
+  const imageLimits = {
+    maxInflatedBytes: IMAGE_LIMITS.maxInflatedBytes,
+    maxPixels: IMAGE_LIMITS.maxPixels,
+    maxBytes: settings.maxImageBytes
+  };
+  const imageMode = settings.imageMode;
   const buffer = Buffer.isBuffer(input) ? input : Buffer.from(input);
   if (!buffer.toString('latin1', 0, 1024).includes('%PDF-')) {
     throw new Error('不是有效的 PDF 文件');
@@ -1279,17 +1333,17 @@ function parsePdfBuffer(input, options = {}) {
     };
   });
 
-  // 内嵌图片的累计状态：同一章里重复引用的图片只嵌一次，总量超过预算时跳过
-  const imageState = { bytes: 0, skipped: 0, count: 0 };
+  // 图片统计：emitted=正文里出现的图片数（不管 base64 还是 URL），count=实际内嵌张数，bytes=内嵌字节量
+  const imageState = { bytes: 0, skipped: 0, count: 0, emitted: 0 };
   const inlineImages = new Map();
 
   function renderPages(pageList) {
     const rendered = [];
     const chapterImages = [];
-    const seen = new Set();
+    const seenInline = new Set();
     for (const item of pageList) {
       const page = pages[item];
-      if (page.imageNames.length === 0 || !settings.inlineImages) {
+      if (page.imageNames.length === 0 || imageMode === 'none') {
         rendered.push(textToHtml(page.text));
         continue;
       }
@@ -1313,22 +1367,37 @@ function parsePdfBuffer(input, options = {}) {
           continue;
         }
         flushText();
-        if (seen.has(block.name)) {
+        if (imageMode === 'url') {
+          const url = buildPageImageUrl(settings.imageUrlBase, page.index + 1, block.name);
+          const xobject = resolveDict(objects, xobjects[block.name]);
+          imageState.emitted += 1;
+          chapterImages.push({
+            page: page.index + 1,
+            name: block.name,
+            url,
+            mediaType: isStream(xobject) ? imageFilterMediaType(xobject, objects) : ''
+          });
+          parts.push(toUrlImageHtml(url));
           continue;
         }
-        const image = decodeImageObject(resolveRef(objects, xobjects[block.name]), objects);
+        // 内嵌模式：同一章里重复引用的同一张图只嵌一次
+        if (seenInline.has(block.name)) {
+          continue;
+        }
+        seenInline.add(block.name);
+        const image = decodeImageObject(resolveRef(objects, xobjects[block.name]), objects, imageLimits);
         if (!image) {
           imageState.skipped += 1;
           continue;
         }
-        if (settings.maxInlineImageBytes > 0 && imageState.bytes + image.data.length > settings.maxInlineImageBytes) {
+        if (imageState.bytes + image.data.length > settings.maxInlineImageBytes) {
           imageState.skipped += 1;
           continue;
         }
         imageState.bytes += image.data.length;
         imageState.count += 1;
-        seen.add(block.name);
-        const meta = { name: block.name, mediaType: image.mediaType, bytes: image.data.length };
+        imageState.emitted += 1;
+        const meta = { page: page.index + 1, name: block.name, mediaType: image.mediaType, bytes: image.data.length };
         chapterImages.push(meta);
         if (!inlineImages.has(block.name)) {
           inlineImages.set(block.name, meta);
@@ -1476,7 +1545,9 @@ function parsePdfBuffer(input, options = {}) {
       // 整本都没有文本层（每页只有图片）：多半是扫描版
       scanned: pages.length > 0 && textPageCount === 0,
       // 已内嵌 base64 的图片张数与原始字节数
-      imageCount: imageState.count,
+      imageMode,
+      imageCount: imageState.emitted,
+      inlinedImages: imageState.count,
       imageBytes: imageState.bytes,
       skippedImages: imageState.skipped,
       unmappedCodes: pages.reduce((total, page) => total + page.unmapped, 0),
@@ -1513,9 +1584,45 @@ function parsePdfFile(filePath, options = {}) {
   return parsePdfBuffer(fs.readFileSync(filePath), options);
 }
 
+// 按页提取单张图片（供 /pdf-page 按需提供正文图片；limits 可比内嵌时宽松）
+function extractPageImage(input, pageNumber, name, options = {}) {
+  const buffer = Buffer.isBuffer(input) ? input : Buffer.from(input);
+  if (!buffer.toString('latin1', 0, 1024).includes('%PDF-')) {
+    throw new Error('不是有效的 PDF 文件');
+  }
+  const limitPage = Number(pageNumber) || 0;
+  if (limitPage < 1) {
+    return null;
+  }
+  const objects = scanPdfObjects(buffer);
+  const page = collectPages(objects)[limitPage - 1];
+  if (!page) {
+    return null;
+  }
+  const xobjects = resolveDict(objects, page.resources ? page.resources.XObject : null);
+  const keys = Object.keys(xobjects);
+  const key = typeof name === 'string' && name && xobjects[name] !== undefined ? name : keys[0];
+  if (!key) {
+    return null;
+  }
+  const limits = {
+    maxInflatedBytes: Number.isFinite(options.maxInflatedBytes) && options.maxInflatedBytes > 0
+      ? options.maxInflatedBytes
+      : 192 * 1024 * 1024,
+    maxPixels: Number.isFinite(options.maxPixels) && options.maxPixels > 0
+      ? options.maxPixels
+      : 64 * 1024 * 1024,
+    maxBytes: Number.isFinite(options.maxBytes) && options.maxBytes > 0
+      ? options.maxBytes
+      : 32 * 1024 * 1024
+  };
+  return decodeImageObject(resolveRef(objects, xobjects[key]), objects, limits);
+}
+
 module.exports = {
   parsePdfBuffer,
   parsePdfFile,
+  extractPageImage,
   encodePng,
   crc32
 };

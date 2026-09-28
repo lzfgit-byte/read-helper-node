@@ -473,8 +473,37 @@ function extractBody(html) {
 // 资源内嵌（图片转 base64 data URI、样式表内联）
 // ---------------------------------------------------------------------------
 
-function createResourceLoader(zip) {
+// 图片安全上限（与 PDF 解析保持一致），超限的图片改为按需 URL 而不是 base64
+const IMAGE_LIMITS = {
+  // 单张图片的原始字节上限
+  maxBytes: 8 * 1024 * 1024,
+  // 整本内嵌图片的原始字节总量上限
+  maxInlineBytes: 24 * 1024 * 1024
+};
+
+// 按需图片地址：/epub-image?id=<书籍id>&href=<书籍内路径>
+function buildImageUrl(base, href) {
+  const safeBase = String(base || '').replace(/["<>]/g, '');
+  const separator = safeBase.includes('?') ? '&' : '?';
+  return `${safeBase}${separator}href=${encodeURIComponent(href)}`;
+}
+
+function createResourceLoader(zip, options = {}) {
   const cache = new Map();
+  const settings = {
+    imageMode: options.imageMode === 'url' || options.imageMode === 'none' || options.imageMode === 'inline'
+      ? options.imageMode
+      : (options.inlineImages === false ? 'none' : 'inline'),
+    imageUrlBase: typeof options.imageUrlBase === 'string' ? options.imageUrlBase : '',
+    maxImageBytes: Number.isFinite(options.maxImageBytes) && options.maxImageBytes > 0
+      ? options.maxImageBytes
+      : IMAGE_LIMITS.maxBytes,
+    maxInlineImageBytes: Number.isFinite(options.maxInlineImageBytes) && options.maxInlineImageBytes >= 0
+      ? options.maxInlineImageBytes
+      : IMAGE_LIMITS.maxInlineBytes
+  };
+  // 内嵌预算：整本 base64 的总量与张数，超过就改用按需地址
+  const state = { bytes: 0, inlined: 0, skipped: 0, referenced: 0 };
 
   function load(href, baseDir) {
     const key = `${baseDir}|${href}`;
@@ -493,24 +522,50 @@ function createResourceLoader(zip) {
     return result;
   }
 
-  // sink 为当前章节的图片收集数组，便于前端知道每章内嵌了哪些图片
-  function loadImage(href, baseDir, sink, meta = {}) {
-    const resource = load(href, baseDir);
+  // 决定一张图片用 base64 还是按需地址；两者都不行时返回 null（调用方保留原标签）
+  function imageSrc(resource) {
     if (!resource) {
       return null;
     }
+    if (settings.imageMode === 'none') {
+      return null;
+    }
+    const onDemand = settings.imageUrlBase ? buildImageUrl(settings.imageUrlBase, resource.href) : null;
+    if (settings.imageMode === 'url') {
+      return onDemand;
+    }
+    const size = resource.data.length;
+    if (size > settings.maxImageBytes || state.bytes + size > settings.maxInlineImageBytes) {
+      // 单张过大或整本预算用尽：有按需地址就用地址，否则跳过（不再无限膨胀）
+      state.skipped += 1;
+      return onDemand;
+    }
+    state.bytes += size;
+    state.inlined += 1;
+    return resource.dataUri;
+  }
+
+  // sink 为当前章节的图片收集数组，便于前端知道每章用了哪些图片
+  function loadImage(href, baseDir, sink, meta = {}) {
+    const resource = load(href, baseDir);
+    const src = imageSrc(resource);
+    if (!resource || !src) {
+      return null;
+    }
+    state.referenced += 1;
     if (Array.isArray(sink)) {
       sink.push({
         href: resource.href,
         mediaType: resource.mediaType,
         bytes: resource.data.length,
+        source: src.startsWith('data:') ? 'base64' : 'url',
         ...meta
       });
     }
-    return resource;
+    return { ...resource, src };
   }
 
-  // 样式表中的 url(...) 同样替换为 base64，保证背景图也能显示
+  // 样式表中的 url(...) 同样替换，保证背景图也能显示
   function inlineCssUrls(css, baseDir, sink) {
     return String(css).replace(/url\(\s*(['"]?)([^'")]+)\1\s*\)/gi, (whole, quote, href) => {
       const value = String(href).trim();
@@ -518,16 +573,16 @@ function createResourceLoader(zip) {
         return whole;
       }
       const resource = loadImage(value, baseDir, sink, { from: 'css' });
-      return resource ? `url("${resource.dataUri}")` : whole;
+      return resource ? `url("${resource.src}")` : whole;
     });
   }
 
-  return { load, loadImage, inlineCssUrls };
+  return { load, loadImage, inlineCssUrls, state, imageMode: settings.imageMode, rewritesImages: settings.imageMode !== 'none' };
 }
 
 // 处理 <head> 中的本地样式表与 <style>，返回可直接拼进章节内容的 CSS
 function collectHeadStyles(headHtml, baseDir, loader, options, images) {
-  const inlineImages = options.inlineImages !== false;
+  const inlineImages = loader.rewritesImages;
   const parts = [];
   const head = String(headHtml || '');
   const linkRegex = /<link\b([^>]*?)\/?>/gi;
@@ -854,9 +909,9 @@ function collectChapterNotes(bodyHtml, baseDir, loader, options = {}) {
   return { html: cleaned, notesHtml: `<br/>${title}<br/>${lines.join('<br/>')}<br/>` };
 }
 
-// 把章节文档处理成“自包含”的 HTML 片段：内联样式 + 图片转 base64 data URI
+// 把章节文档处理成“自包含”的 HTML 片段：内联样式 + 图片内嵌（超预算的改用按需地址）
 function inlineResources(documentHtml, baseDir, loader, options, images) {
-  const inlineImages = options.inlineImages !== false;
+  const inlineImages = loader.rewritesImages;
   const source = String(documentHtml || '');
   const headMatch = source.match(/<head\b[^>]*>([\s\S]*?)<\/head>/i);
   const headStyles = options.inlineStyles === false
@@ -888,7 +943,7 @@ function inlineResources(documentHtml, baseDir, loader, options, images) {
       svgParsed.height ? `height="${svgParsed.height}"` : ''
     ].filter(Boolean).join(' ');
     const alt = imageAttrs.alt ? ` alt="${imageAttrs.alt}"` : ' alt=""';
-    return `<img src="${resource.dataUri}"${alt}${size ? ` ${size}` : ''} />`;
+    return `<img src="${resource.src}"${alt}${size ? ` ${size}` : ''} />`;
   }) : output;
 
   // 3. <img> 与 SVG <image> 的资源地址改为 base64
@@ -905,9 +960,9 @@ function inlineResources(documentHtml, baseDir, loader, options, images) {
       }
       if (tagName.toLowerCase() === 'image') {
         const alt = attrs.alt ? ` alt="${attrs.alt}"` : ' alt=""';
-        return `<img src="${resource.dataUri}"${alt} />`;
+        return `<img src="${resource.src}"${alt} />`;
       }
-      return whole.replace(/src\s*=\s*("([^"]*)"|'([^']*)')/i, `src="${resource.dataUri}"`);
+      return whole.replace(/src\s*=\s*("([^"]*)"|'([^']*)')/i, `src="${resource.src}"`);
     });
   }
 
@@ -1014,6 +1069,17 @@ function parseEpubBuffer(input, options = {}) {
     blockImages: options.blockImages !== false,
     notesToEnd: options.notesToEnd !== false,
     notesTitle: options.notesTitle,
+    // 图片：inline=base64（超预算时若有 imageUrlBase 则改用按需地址）/ url=全按需 / none=不动
+    imageMode: options.imageMode === 'url' || options.imageMode === 'none' || options.imageMode === 'inline'
+      ? options.imageMode
+      : (options.inlineImages === false ? 'none' : 'inline'),
+    imageUrlBase: typeof options.imageUrlBase === 'string' ? options.imageUrlBase : '',
+    maxImageBytes: Number.isFinite(options.maxImageBytes) && options.maxImageBytes > 0
+      ? options.maxImageBytes
+      : IMAGE_LIMITS.maxBytes,
+    maxInlineImageBytes: Number.isFinite(options.maxInlineImageBytes) && options.maxInlineImageBytes >= 0
+      ? options.maxInlineImageBytes
+      : IMAGE_LIMITS.maxInlineBytes,
     // 章节标题规则（与 TXT 解析共用）用于判断拆开的标题能否合并
     rules: options.rules && typeof options.rules === 'object' ? options.rules : getDefaultRules(),
     directoryEntries: Array.isArray(options.directoryEntries) ? options.directoryEntries : [],
@@ -1061,7 +1127,7 @@ function parseEpubBuffer(input, options = {}) {
     }
   }
 
-  const loader = createResourceLoader(zip);
+  const loader = createResourceLoader(zip, settings);
   const tocLookup = buildTocLookup(toc, opfDir);
 
   // 封面：meta[name=cover] -> properties="cover-image" -> guide[type=cover] 内的图片
@@ -1171,12 +1237,17 @@ function parseEpubBuffer(input, options = {}) {
     cover: coverMeta,
     toc: toc.map((item) => ({ title: item.title, href: joinPath(opfDir, item.href), level: item.level || 0 })),
     chapters: mergedChapters,
-    images: settings.inlineImages === false ? [] : allImages,
+    images: allImages,
     stats: {
       entries: zip.names().length,
       spineCount: spineRefs.length,
       chapterCount: mergedChapters.length,
-      imageCount: settings.inlineImages === false ? 0 : allImages.length
+      imageMode: loader.imageMode,
+      // 正文里引用的图片张数（base64 或按需地址），以及其中内嵌的
+      imageCount: allImages.length,
+      inlinedImages: loader.state.inlined,
+      imageBytes: loader.state.bytes,
+      skippedImages: loader.state.skipped
     }
   };
   // 封面原始字节仅供调用方（主进程）写文件或按 URL 提供，不参与 JSON 序列化
@@ -1188,9 +1259,25 @@ function parseEpubFile(filePath, options = {}) {
   return parseEpubBuffer(fs.readFileSync(filePath), options);
 }
 
+// 按需读取书籍内的单个资源（供 /epub-image 接口使用），href 为书籍内的相对路径
+function readEpubResource(input, href) {
+  const buffer = Buffer.isBuffer(input) ? input : Buffer.from(input);
+  const target = String(href || '').replace(/\\/g, '/').replace(/^\/+/, '');
+  if (!target || target.split('/').includes('..')) {
+    return null;
+  }
+  const zip = openZip(buffer);
+  const data = zip.read(target);
+  if (!data) {
+    return null;
+  }
+  return { href: target, mediaType: guessMediaType(target) || 'application/octet-stream', data };
+}
+
 module.exports = {
   parseEpubBuffer,
   parseEpubFile,
+  readEpubResource,
   openZip,
   readCentralDirectory,
   decodeText,
