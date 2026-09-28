@@ -358,6 +358,62 @@ test('imageMode url serves every image on demand', () => {
   assert.equal(result.images[0].source, 'url');
 });
 
+test('inlines every image by default even when the book is large', () => {
+  // 5 张 6 MB 图片（共 30 MB）：默认不设总量上限，应全部内嵌
+  // （旧实现的 24 MB 预算会跳过后面两张）
+  const crypto = require('crypto');
+  const bigImage = () => crypto.randomBytes(6 * 1024 * 1024);
+  const chapter = `<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <body>
+    <h1>插图页</h1>
+    <img src="images/a.jpg"/><img src="images/b.jpg"/><img src="images/c.jpg"/>
+    <img src="images/d.jpg"/><img src="images/e.jpg"/>
+  </body>
+</html>`;
+  const epub = createZip([
+    { name: 'mimetype', data: 'application/epub+zip' },
+    { name: 'META-INF/container.xml', data: CONTAINER_XML, compress: true },
+    {
+      name: 'OEBPS/content.opf',
+      data: `<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="bookid">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>大图</dc:title><dc:identifier id="bookid">urn:uuid:big</dc:identifier>
+  </metadata>
+  <manifest><item id="ch1" href="chapter1.xhtml" media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="ch1"/></spine>
+</package>`,
+      compress: true
+    },
+    { name: 'OEBPS/images/a.jpg', data: bigImage() },
+    { name: 'OEBPS/images/b.jpg', data: bigImage() },
+    { name: 'OEBPS/images/c.jpg', data: bigImage() },
+    { name: 'OEBPS/images/d.jpg', data: bigImage() },
+    { name: 'OEBPS/images/e.jpg', data: bigImage() },
+    { name: 'OEBPS/chapter1.xhtml', data: chapter, compress: true }
+  ]);
+  const result = parseEpubBuffer(epub);
+
+  assert.equal(result.stats.imageCount, 5);
+  assert.equal(result.stats.inlinedImages, 5, `五张图全部 base64（实际 ${result.stats.inlinedImages}）`);
+  assert.equal(result.stats.skippedImages, 0);
+  assert.ok(result.stats.imageBytes >= 30 * 1024 * 1024, `内嵌字节 ${result.stats.imageBytes}`);
+  assert.equal((result.chapters[0].content.match(/data:image\/jpeg;base64,/g) || []).length, 5);
+});
+
+test('imageChapterIndex only inlines the requested chapter', () => {
+  const result = parseEpubBuffer(createSampleEpub(), { imageChapterIndex: 1 });
+  const [first, second] = result.chapters;
+
+  assert.equal(result.stats.inlinedImages, 0, '第 2 章没有图片');
+  assert.ok(!first.content.includes('base64,'), '未请求的章节不生成图片数据');
+  assert.ok(first.content.includes('src="images/pic.png"'), '未请求的章节保留原始标签（结构不变）');
+  assert.ok(first.title.includes('第一章'), '标题与章节结构不受影响');
+  assert.equal(result.chapters.length, 2);
+  assert.ok(second.content.includes('没有标题的章节'));
+});
+
 test('readEpubResource reads a single file and rejects traversal', () => {
   const epub = createSampleEpub();
   const resource = readEpubResource(epub, 'OEBPS/images/pic.png');

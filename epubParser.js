@@ -558,9 +558,17 @@ function createResourceLoader(zip, options = {}) {
     maxImageBytes: Number.isFinite(options.maxImageBytes) && options.maxImageBytes > 0
       ? options.maxImageBytes
       : IMAGE_LIMITS.maxBytes,
-    maxInlineImageBytes: Number.isFinite(options.maxInlineImageBytes) && options.maxInlineImageBytes >= 0
+    maxInlineImageBytes: Number.isFinite(options.maxInlineImageBytes) && options.maxInlineImageBytes > 0
       ? options.maxInlineImageBytes
-      : IMAGE_LIMITS.maxInlineBytes,
+      : 0,
+    // 只内嵌指定下标的章节，其余章节只保留结构（未指定=整本内嵌）
+    imageChapterIndex: Number.isInteger(options.imageChapterIndex) && options.imageChapterIndex >= 0
+      ? options.imageChapterIndex
+      : null,
+    // 或按章节文件路径指定（章节合并后下标可能变化，用 href 更稳）
+    imageChapterHref: typeof options.imageChapterHref === 'string' && options.imageChapterHref
+      ? options.imageChapterHref
+      : '',
     // 字体等非图片资源默认不内嵌（改用按需地址），需要旧的“全内嵌”行为时传 true
     inlineFonts: options.inlineFonts === true,
     // 超预算资源写盘后返回地址的回调（未保存的解析；已保存的书籍用 imageUrlBase）
@@ -572,6 +580,9 @@ function createResourceLoader(zip, options = {}) {
     inlined: 0,
     skipped: 0,
     referenced: 0,
+    // 当前正在处理的章节（配合 imageChapterIndex / imageChapterHref 做按章内嵌）
+    chapterIndex: 0,
+    chapterHref: '',
     // 字体等非图片资源（不计入正文图片统计，但同样占用预算）
     assetCount: 0,
     assetBytes: 0
@@ -614,6 +625,13 @@ function createResourceLoader(zip, options = {}) {
     if (!resource || settings.imageMode === 'none') {
       return null;
     }
+    // 只要指定了章节：其它章节不生成图片数据（结构不变，图片标签原样保留）
+    if (settings.imageChapterHref && settings.imageChapterHref !== state.chapterHref) {
+      return null;
+    }
+    if (settings.imageChapterIndex !== null && state.chapterIndex !== settings.imageChapterIndex) {
+      return null;
+    }
     const size = resource.data.length;
     const image = isImageMediaType(resource.mediaType);
     // 字体等非图片资源默认不内嵌：同一字体常被多章引用，base64 会在每章重复一份
@@ -626,21 +644,29 @@ function createResourceLoader(zip, options = {}) {
       }
       return null;
     }
-    const oversize = size > settings.maxImageBytes;
-    const overBudget = state.bytes + size > settings.maxInlineImageBytes;
-    if (settings.imageMode === 'url' || oversize || overBudget) {
-      if (oversize || overBudget) {
-        state.skipped += 1;
-      }
+    // 单张过大：能给按需地址就给，否则跳过（防止单张图直接拉爆内存）
+    if (size > settings.maxImageBytes) {
+      state.skipped += 1;
       const url = resourceUrl(resource);
       if (url) {
-        if (!image) {
-          state.assetCount += 1;
-        }
         return url;
       }
-      // 既不能内嵌又没有按需地址：跳过（保留原始相对地址，不显示但不会爆内存）
       return null;
+    }
+    // 总预算只在调用方显式给正数时生效（默认不限，保证正文图片都是 base64）
+    if (settings.maxInlineImageBytes > 0 && state.bytes + size > settings.maxInlineImageBytes) {
+      state.skipped += 1;
+      const url = resourceUrl(resource);
+      if (url) {
+        return url;
+      }
+      return null;
+    }
+    if (settings.imageMode === 'url') {
+      const url = resourceUrl(resource);
+      if (url) {
+        return url;
+      }
     }
     state.bytes += size;
     state.inlined += 1;
@@ -686,7 +712,18 @@ function createResourceLoader(zip, options = {}) {
     });
   }
 
-  return { load, loadImage, inlineCssUrls, state, imageMode: settings.imageMode, rewritesImages: settings.imageMode !== 'none' };
+  return {
+    load,
+    loadImage,
+    inlineCssUrls,
+    state,
+    imageMode: settings.imageMode,
+    rewritesImages: settings.imageMode !== 'none',
+    setChapter: (index, href) => {
+      state.chapterIndex = index;
+      state.chapterHref = href || '';
+    }
+  };
 }
 
 // 处理 <head> 中的本地样式表与 <style>，返回可直接拼进章节内容的 CSS
@@ -1184,7 +1221,7 @@ function parseEpubBuffer(input, options = {}) {
     blockImages: options.blockImages !== false,
     notesToEnd: options.notesToEnd !== false,
     notesTitle: options.notesTitle,
-    // 图片：inline=base64（超预算时若有 imageUrlBase 则改用按需地址）/ url=全按需 / none=不动
+    // 图片：inline=base64（默认，正文自包含，离线也能看）/ url=按需地址 / none=不动
     imageMode: options.imageMode === 'url' || options.imageMode === 'none' || options.imageMode === 'inline'
       ? options.imageMode
       : (options.inlineImages === false ? 'none' : 'inline'),
@@ -1192,9 +1229,16 @@ function parseEpubBuffer(input, options = {}) {
     maxImageBytes: Number.isFinite(options.maxImageBytes) && options.maxImageBytes > 0
       ? options.maxImageBytes
       : IMAGE_LIMITS.maxBytes,
-    maxInlineImageBytes: Number.isFinite(options.maxInlineImageBytes) && options.maxInlineImageBytes >= 0
+    // 整本内嵌总量上限：默认 0 = 不限（图片一律 base64）；给了正数才会超限降级
+    maxInlineImageBytes: Number.isFinite(options.maxInlineImageBytes) && options.maxInlineImageBytes > 0
       ? options.maxInlineImageBytes
-      : IMAGE_LIMITS.maxInlineBytes,
+      : 0,
+    // 只内嵌指定下标的章节（未指定则整本都内嵌）
+    imageChapterIndex: Number.isInteger(options.imageChapterIndex) && options.imageChapterIndex >= 0
+      ? options.imageChapterIndex
+      : null,
+    // 或按章节文件路径指定（章节合并后下标可能变化，用 href 更稳）
+    imageChapterHref: typeof options.imageChapterHref === 'string' ? options.imageChapterHref : '',
     // 字体等非图片资源默认不内嵌（同一字体被多章引用会重复几十份 base64）
     inlineFonts: options.inlineFonts === true,
     // 超预算资源写盘后返回地址（未保存的解析；已保存的书籍用 imageUrlBase）
@@ -1314,6 +1358,8 @@ function parseEpubBuffer(input, options = {}) {
       const index = chapters.length + 1;
       const tocTitle = tocLookup.get(normalizeHrefKey(href)) || '';
       const title = extractHeadingTitle(body) || tocTitle || `第${index}章`;
+      // 配合 imageChapterIndex / imageChapterHref：只给目标章节生成图片数据
+      loader.setChapter(index - 1, href);
       const chapterImages = [];
       const chapterHtml = inlineResources(raw, pathDir(href), loader, settings, chapterImages);
       for (const image of chapterImages) {

@@ -483,8 +483,8 @@ test('inlines a repeated image only once per chapter', () => {
   assert.equal(result.chapters[0].content.split('<img').length - 1, 1);
 });
 
-test('emits page image urls instead of base64 when imageUrlBase is set', () => {
-  const result = parsePdfBuffer(buildIllustratedPdf(), { imageUrlBase: '/pdf-page?id=5' });
+test('emits page image urls instead of base64 when imageMode is url', () => {
+  const result = parsePdfBuffer(buildIllustratedPdf(), { imageMode: 'url', imageUrlBase: '/pdf-page?id=5' });
   const chapter = result.chapters[0];
 
   assert.equal(result.stats.imageMode, 'url');
@@ -507,6 +507,76 @@ test('imageMode none keeps text only', () => {
   assert.equal(result.stats.imageCount, 0);
   assert.ok(!result.chapters[0].content.includes('<img'));
   assert.ok(result.chapters[0].content.includes('Before image paragraph'));
+});
+
+test('inlines every page image by default (no total budget)', () => {
+  // 多页 + 大图：默认应全部内嵌，不因为总量而降级/丢弃
+  const jpegBytes = Buffer.alloc(1024 * 1024);
+  jpegBytes[0] = 0xff;
+  jpegBytes[1] = 0xd8;
+  jpegBytes[2] = 0xff;
+  for (let i = 3; i < jpegBytes.length; i += 1) {
+    jpegBytes[i] = (i * 31) & 0xff;
+  }
+  const pageCount = 40;
+  const objects = [
+    { body: '<< /Type /Catalog /Pages 2 0 R >>' },
+    { body: `<< /Type /Pages /Kids [${Array.from({ length: pageCount }, (_, i) => `${3 + i * 3} 0 R`).join(' ')}] /Count ${pageCount} >>` }
+  ];
+  for (let i = 0; i < pageCount; i += 1) {
+    const pageNumber = 3 + i * 3;
+    objects.push({
+      body: `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] `
+        + `/Resources << /XObject << /Im0 ${pageNumber + 2} 0 R >> >> /Contents ${pageNumber + 1} 0 R >>`
+    });
+    objects.push({ body: streamBody('', 'q 579 0 0 840 7 0 cm /Im0 Do Q') });
+    objects.push({
+      body: streamBody(
+        '/Type /XObject /Subtype /Image /Width 4 /Height 4 /ColorSpace /DeviceRGB '
+          + '/BitsPerComponent 8 /Filter /DCTDecode',
+        jpegBytes
+      )
+    });
+  }
+  const result = parsePdfBuffer(buildPdf({ objects, root: 1 }));
+
+  assert.equal(result.chapters.length, pageCount);
+  assert.equal(result.stats.inlinedImages, pageCount, `全部内嵌（实际 ${result.stats.inlinedImages}）`);
+  assert.equal(result.stats.skippedImages, 0);
+  assert.ok(result.stats.imageBytes >= pageCount * 1024 * 1024);
+  assert.ok(result.chapters.every((chapter) => chapter.content.includes('data:image/jpeg;base64,')));
+});
+
+test('imageChapterIndex only builds images for the requested chapter', () => {
+  const jpegBytes = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0xff, 0xd9]);
+  const objects = [
+    { body: '<< /Type /Catalog /Pages 2 0 R >>' },
+    { body: '<< /Type /Pages /Kids [3 0 R 6 0 R] /Count 2 >>' }
+  ];
+  for (let i = 0; i < 2; i += 1) {
+    const pageNumber = 3 + i * 3;
+    objects.push({
+      body: `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 9 0 R >> `
+        + `/XObject << /Im0 ${pageNumber + 2} 0 R >> >> /Contents ${pageNumber + 1} 0 R >>`
+    });
+    objects.push({ body: streamBody('', `q 579 0 0 840 7 0 cm /Im0 Do Q\nBT /F1 24 Tf 72 720 Td (Page ${i + 1} text) Tj ET`) });
+    objects.push({
+      body: streamBody(
+        '/Type /XObject /Subtype /Image /Width 4 /Height 4 /ColorSpace /DeviceRGB '
+          + '/BitsPerComponent 8 /Filter /DCTDecode',
+        jpegBytes
+      )
+    });
+  }
+  objects.push({ body: '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>' });
+  const pdf = buildPdf({ objects, root: 1 });
+  const target = parsePdfBuffer(pdf, { imageChapterIndex: 1 });
+
+  assert.equal(target.chapters.length, 2, '章节结构不变');
+  assert.ok(!target.chapters[0].content.includes('data:image'), '未请求的章节不生成图片');
+  assert.ok(target.chapters[0].content.includes('Page 1 text'), '未请求的章节仍有正文');
+  assert.ok(target.chapters[1].content.includes('data:image/jpeg;base64,'), '目标章节内嵌图片');
+  assert.equal(target.stats.inlinedImages, 1);
 });
 
 test('skips absurd image dimensions instead of allocating memory', () => {

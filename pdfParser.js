@@ -1269,16 +1269,19 @@ function parsePdfBuffer(input, options = {}) {
     includeText: options.includeText !== false,
     includeChapters: options.includeChapters !== false,
     paragraphMerge: options.paragraphMerge !== false,
-    // 正文图片：inline=base64 内嵌 / url=按需地址 / none=不出图
-    // 默认：传了 imageUrlBase 就用 url（扫描版几百页不会把堆撑爆），否则内嵌
+    // 正文图片：inline=base64 内嵌（默认，正文自包含）/ url=按需地址 / none=不出图
     imageMode: ['inline', 'url', 'none'].includes(options.imageMode)
       ? options.imageMode
-      : (options.imageUrlBase ? 'url' : (options.inlineImages === false ? 'none' : 'inline')),
+      : (options.inlineImages === false ? 'none' : 'inline'),
     imageUrlBase: typeof options.imageUrlBase === 'string' ? options.imageUrlBase : '',
-    // 整本内嵌图片的原始字节上限（默认 24 MB，防止一次性生成几十 MB 的 base64）
-    maxInlineImageBytes: Number.isFinite(options.maxInlineImageBytes) && options.maxInlineImageBytes >= 0
+    // 整本内嵌总量上限：默认 0 = 不限（图片一律 base64）；给了正数才会超限降级
+    maxInlineImageBytes: Number.isFinite(options.maxInlineImageBytes) && options.maxInlineImageBytes > 0
       ? options.maxInlineImageBytes
-      : 24 * 1024 * 1024,
+      : 0,
+    // 只内嵌指定下标的章节（一个章节一个请求时用，避免整本图片都先生成一遍）
+    imageChapterIndex: Number.isInteger(options.imageChapterIndex) && options.imageChapterIndex >= 0
+      ? options.imageChapterIndex
+      : null,
     maxImageBytes: Number.isFinite(options.maxImageBytes) && options.maxImageBytes > 0
       ? options.maxImageBytes
       : IMAGE_LIMITS.maxBytes,
@@ -1339,13 +1342,15 @@ function parsePdfBuffer(input, options = {}) {
   const imageState = { bytes: 0, skipped: 0, count: 0, emitted: 0 };
   const inlineImages = new Map();
 
-  function renderPages(pageList) {
+  function renderPages(pageList, chapterIndex) {
     const rendered = [];
     const chapterImages = [];
     const seenInline = new Set();
+    // 指定了章节时，只给这一章生成图片（其余章节只出文字，结构不变）
+    const allowImages = settings.imageChapterIndex === null || settings.imageChapterIndex === chapterIndex;
     for (const item of pageList) {
       const page = pages[item];
-      if (page.imageNames.length === 0 || imageMode === 'none') {
+      if (page.imageNames.length === 0 || imageMode === 'none' || !allowImages) {
         rendered.push(textToHtml(page.text));
         continue;
       }
@@ -1392,7 +1397,7 @@ function parsePdfBuffer(input, options = {}) {
           imageState.skipped += 1;
           continue;
         }
-        if (imageState.bytes + image.data.length > settings.maxInlineImageBytes) {
+        if (settings.maxInlineImageBytes > 0 && imageState.bytes + image.data.length > settings.maxInlineImageBytes) {
           // 超出内嵌预算：能给按需地址就给，否则跳过（不再无限膨胀）
           const cachedUrl = settings.resourceCache
             ? settings.resourceCache({ href: `page:${page.index + 1}/${block.name}`, mediaType: image.mediaType, data: image.data })
@@ -1444,7 +1449,7 @@ function parsePdfBuffer(input, options = {}) {
       for (let i = start; i < end; i += 1) {
         pageIndexes.push(i);
       }
-      const rendered = renderPages(pageIndexes);
+      const rendered = renderPages(pageIndexes, chapters.length);
       const contentPages = pages.slice(start, end);
       chapters.push({
         title: entry.title,
@@ -1459,7 +1464,7 @@ function parsePdfBuffer(input, options = {}) {
   }
   if (chapters.length === 0) {
     for (const page of pages) {
-      const rendered = renderPages([page.index]);
+      const rendered = renderPages([page.index], chapters.length);
       chapters.push({
         title: `第 ${page.index + 1} 页`,
         href: `page:${page.index + 1}`,

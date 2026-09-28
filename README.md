@@ -40,11 +40,12 @@ Electron 应用，支持：
 - 选择 `.epub` 文件后上传，自动读取书名、作者、简介与封面
 - 按 `spine` 顺序输出章节，章节标题优先取 `<h1>~<h6>`，其次取 NCX/Nav 目录标题
 - **标题被拆到不同 xhtml 时自动合并**：某章没有正文（空内容或只有标题）、下一章有正文，且两个标题合起来仍符合章节规则时，合并为一个目录（如「第十二章」+「风起云涌」→「第十二章 风起云涌」，正文跟在合并后的目录后）。判断逻辑与 TXT 章节解析完全共用（`parseRules.js` 的 `mergeChapterTitles`），服务端会把当前章节规则传进来；插图页（只含 `<img>`）和下一章本身是完整「第X章」标题的情况不合并，合并后的章节会带 `sourceHrefs` 便于排查
-- 章节内的图片（`<img>`、SVG `<image>`、CSS `url(...)`）默认转成 `data:<mime>;base64,...` 内嵌在返回的 HTML 中，前端无需再请求图片接口
-  - **但不再“无限内嵌”**：整本内嵌总量默认上限 24 MB、单张 8 MB，超过的图片在**已保存的书籍**里会自动改用 `/epub-image?id=<书籍id>&href=<书籍内路径>` 按需地址（图片实时从 EPUB 里取出并少量缓存，LRU 64），图片很多的漫画类书籍不会再把堆撑爆；未保存的解析（没有按需地址）则会跳过并在 `book.warnings` 里提示
-  - **字体等非图片资源默认不内嵌**：同一字体常被多章引用，base64 会在每章重复一份（这本书光字体就 23 MB）→ 统一改为按需地址，需要旧行为可传 `inlineFonts: true`
-  - 未保存的解析（没有 `/epub-image` 地址）会把超预算的图片/字体写到 `ebook-assets` 缓存目录，返回 `/ebook-assets/<sha1>.<ext>`（按内容 sha1 去重，同一张图只写一份），不再直接丢图
-  - 可用 `imageMode: 'url'` 把全部图片改为按需地址，`imageMode: 'none'` 完全不处理图片（保留原始相对地址），`maxInlineImageBytes` / `maxImageBytes` 调整预算
+- 章节内的图片（`<img>`、SVG `<image>`、CSS `url(...)`）默认转成 `data:<mime>;base64,...` **全部内嵌**在返回的 HTML 中，正文自包含、离线也能看图，前端无需再请求图片接口
+  - **默认不设总量上限**：一本 340 张图的 85 MB 书会内嵌约 72 MB base64（图片不做压缩转换，只做 base64），这是“图片都能看到”的前提
+  - **整本一次性解析不会爆内存**：`/content` 只解析请求的那一章（`/bookinfo` 的链接带 `&index=`，解析时只给这一章生成图片，其余章节只保留结构），单章图片量与内存只跟这一章有关
+  - 单张图片上限 8 MB（`maxImageBytes`），更大的单张图会跳过并计入 `skippedImages`；`maxInlineImageBytes` 给正数时才启用整本总量预算（超限的图片会改用按需地址或跳过）
+  - **字体等非图片资源默认不内嵌**：同一字体常被多章引用，base64 会在每章重复一份（某本书光字体就 23 MB）→ 统一改为按需地址，需要旧行为可传 `inlineFonts: true`
+  - 可用 `imageMode: 'url'` 把图片改成按需地址（`/epub-image?id=<书籍id>&href=<书籍内路径>`，从 EPUB 里实时取出 + LRU 缓存）、`imageMode: 'none'` 完全不处理图片；未保存的解析（没有书籍 id）会退到 `ebook-assets` 磁盘缓存，返回 `/ebook-assets/<sha1>.<ext>`
   - 统计在 `stats` 里：`imageMode`（`inline`/`url`/`none`）、`imageCount`（引用张数）、`inlinedImages`（base64 张数）、`imageBytes`、`skippedImages`（改用按需或跳过）
 - **正文图片直接内联展示**：多看书系等 EPUB 会把插图/注号图包成 `<sup><a href="..."><img/></a></sup>`，解析时会把这类「只包图片」的 `sup`/`sub`/`a` 包裹层去掉，只保留 `<img>` 本身（带文字的正常链接不动）；可用 `unwrapImages: false` 关闭
 - **懒加载图片（微信读书等导出）**：`<img data-src="..." src="占位/相对路径">` 这类写法里，base64 只会写进真正的 `src`（不再误改 `data-src`）；`src` 是空值或 1×1 占位图时会改用 `data-src` / `data-original` 等属性指向的书内图片，保证阅读器上真得能显示出图
@@ -104,10 +105,10 @@ Electron 应用，支持：
 - **分章方式**：优先按 PDF 书签（`/Outlines`，支持 `Dest` 与 `A /D`，按层级取 `level`）分章，书签指向的页码区间即章节正文；没有书签时降级为「每页一章」，标题为 `第 N 页`（可用 `chapterMode: 'page'` 强制按页）
 - 同样执行**目录合并**：某个目录没有正文（空内容或只有标题）、下一个目录有正文，且两个标题合起来仍符合章节规则时合并为一条（与 TXT/EPUB 共用 `parseRules.mergeChapterTitles`）
 - **文本抽取**：内容流支持 `BT/ET`、`Tf/TL/Td/TD/T*/Tm`、`Tj`、`'`、`"`、`TJ`（水平间距 ≤ -200 判为空格），并会递归进入 `Do` 调用的 Form XObject；段落按行合并（上一行以 `。！？；：…——”"'）】》」』〕）\]\)．.!?;` 结尾或长度不足 8 字则不合并）
-- **正文图片默认按需加载（不再全量 base64）**：页面内容流里 `Do` 到的图片会按「文本 / 图片」出现的先后顺序插进章节正文：
-  - **已保存的书籍**：正文里只放一个按需地址 `<img src="/pdf-page?id=<书籍id>&page=12&name=Im0" style="display:block;max-width:100%;height:auto;"/>`，图片每页实时解码后返回并少量缓存（LRU 32）。扫描版一页一张整页图时，单章 HTML 只有几百字节，不会把主进程内存拉爆
-  - **未保存的解析（预演/书源一次性取全书）**：默认 base64 内嵌（与 EPUB 一致），但受 **单张 8 MB / 全书 24 MB** 预算限制，超出的图片会被跳过并计入 `stats.skippedImages`（`book.warnings` 会提示）。可传 `imageMode: 'url' | 'none' | 'inline'`、`imageUrlBase`、`maxInlineImageBytes` 自行控制
-  - 图片位置优先按 y 坐标从大到小排序（PDF 原点在左下角），文字与图片都能拿到坐标时更接近视觉顺序；坐标不可比（进入过 Form XObject）时退回内容流顺序；内嵌模式下同一章里重复引用的同一张图只嵌一次
+- **正文图片全部 base64 内嵌（默认，正文自包含、离线也能看）**：页面内容流里 `Do` 到的图片按「文本 / 图片」出现的先后顺序插进章节正文
+  - 图片位置优先按 y 坐标从大到小排序（PDF 原点在左下角），文字与图片都能拿到坐标时更接近视觉顺序；坐标不可比（进入过 Form XObject）时退回内容流顺序；同一章里重复引用的同一张图只嵌一次
+  - **整本一次性解析不会因为图片多而爆内存**：`/content` 只解析请求的那一章（`/bookinfo` 的链接带 `&index=`，解析器只给这一章生成图片，其余章节只保留结构），单章字节数 ≈ 这一章的图片大小
+  - 需要 URL 形式时可显式传 `imageMode: 'url'`（配 `/pdf-page` 按需地址）或 `'none'`；`maxInlineImageBytes` 给正数时才会在超总量时降级（默认 0 = 不限），`imageMode: 'url'` 配合 `/pdf-page` 时图片每页实时解码 + LRU 小缓存
   - 图片数量与「是否内嵌」无关：`chapter.imageCount` 始终反映页面里检测到的图片数，所以**章节结构不会因为图片模式而变化**（同样的章节数、同样的 id/顺序）
 - **内存安全底线**（防住扫描书把堆撑爆）：单个流解压上限 64 MB（`zlib` 的 `maxOutputLength`，防解压炸弹）、单张图片像素上限 32 MP、单张内嵌字节上限 8 MB；异常尺寸的图片直接跳过而不是尝试分配
 - **字体与编码**：`Type0`/复合字体按 2 字节编码处理，优先用 `ToUnicode` CMap（支持 `beginbfchar` 与 `beginbfrange`，目标含多码元时进位正确）；没有 CMap 时按编码名回退（`UCS2/UTF16*` 直当 Unicode、`GBK-EUC/GBPC` 用 `TextDecoder('gbk')`、`ETEN/BIG5` 用 `TextDecoder('big5')`）；简单字体用 WinAnsi 表回退；解析不出映射的码会在 `stats.unmappedCodes` 里计数
@@ -131,26 +132,28 @@ Electron 应用，支持：
       "title": "第一章",
       "href": "page:1",
       "pages": [1, 18],
-      "content": "正文<br/><br/><img src=\"/pdf-page?id=5&page=12&name=Im0\" style=\"display:block;max-width:100%;height:auto;\" /><br/>更多正文",
+      "content": "正文<br/><br/><img src=\"data:image/jpeg;base64,...\" style=\"display:block;max-width:100%;height:auto;\" /><br/>更多正文",
       "text": "纯文本（不含图片，供目录与合并判断使用）",
       "imageCount": 2,
-      "images": [{ "page": 12, "name": "Im0", "url": "/pdf-page?id=5&page=12&name=Im0", "mediaType": "image/jpeg" }]
+      "images": [{ "page": 12, "name": "Im0", "mediaType": "image/jpeg", "bytes": 20480 }]
     }
   ],
   "images": [{ "name": "Im1", "mediaType": "image/jpeg", "bytes": 20480 }],
   "stats": {
     "pageCount": 274, "chapterCount": 12, "textLength": 123456, "textPageCount": 260,
-    "scanned": false, "imageMode": "url", "imageCount": 12,
-    "inlinedImages": 0, "imageBytes": 0, "skippedImages": 0
+    "scanned": false, "imageMode": "inline", "imageCount": 12,
+    "inlinedImages": 12, "imageBytes": 245760, "skippedImages": 0
   }
 }
 ```
 
-内嵌模式（`imageMode: 'inline'`）下 `content` 里是 `data:image/...;base64,...`，`chapter.images` 带 `bytes`，`stats.inlinedImages/imageBytes` 反映实际内嵌量。
+`imageMode: 'url'` 时 `content` 里改放 `/pdf-page?id=<书籍id>&page=12&name=Im0` 这样的按需地址，`stats.inlinedImages/imageBytes` 为 0。
 
 `parse-epub-file` / `POST /data-operate/epub/parse` 返回会多一个 `format` 字段（`epub` / `pdf`）便于前端区分展示，`book` 摘要里也带 `format/pageCount/outlineCount/scanned/imageCount/warnings`。
 
-阅读器的两个内部接口都走同一条解析链路：`/bookinfo`（只列目录）传 `inlineImages: false`，避免为了一份目录反复生成 base64；`/content`（取正文）则输出 `/pdf-page` 按需图片地址。
+阅读器的两个内部接口都走同一条解析链路：`/bookinfo`（只列目录）传 `inlineImages: false`，链接里带 `&index=<章节下标>`；`/content` 用这个下标只解析那一章（正文图片为 base64，可离线阅读）。
+
+> 正文图片默认一律 base64：如果客户端只能显示内嵌图片（部分阅读器/书源不加载正文图片地址），保持默认即可，不需要传 `imageMode`。
 
 ## 测试
 
