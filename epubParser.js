@@ -1113,11 +1113,16 @@ function inlineResources(documentHtml, baseDir, loader, options, images) {
     }
     const imageAttrs = parseAttributes(imageTag[1]);
     const href = imageAttrs['xlink:href'] || imageAttrs.href || '';
-    const resource = href ? loader.loadImage(href, baseDir, images, { from: 'svg' }) : null;
-    if (!resource) {
+    if (!href) {
       return whole;
     }
-    return buildContentImageTag(resource.src);
+    const resource = loader.loadImage(href, baseDir, images, { from: 'svg' });
+    if (resource) {
+      return buildContentImageTag(resource.src);
+    }
+    // 没内嵌（按章解析时其它章节的图、或书里缺这个文件）也换成 <img>：
+    // 阅读器渲染不了 <svg><image>，而章节是否含图必须与整体解析保持一致
+    return buildContentImageTag(href);
   }) : output;
 
   // 3. <img> 与 SVG <image> 的资源地址改为 base64（或按需地址）
@@ -1132,9 +1137,9 @@ function inlineResources(documentHtml, baseDir, loader, options, images) {
       if (resource) {
         return buildContentImageTag(resource.src);
       }
-      // SVG <image> 取不到资源时保持原样
+      // SVG <image> 取不到资源时也换成 <img>（阅读器渲染不了 <image>）
       if (!isImgTag) {
-        return whole;
+        return href ? buildContentImageTag(href) : whole;
       }
       // 取不到本地资源（外链图片 / 书里没有这个文件）：保留原 src（按需地址或外链），
       // 只输出固定格式，把 data-src / data-original / srcset 这类候选属性一并丢掉
@@ -1181,9 +1186,15 @@ function chapterTextOf(chapter) {
   return htmlToText(chapter.content);
 }
 
-// 无正文的章节：没有文本，或只有标题；插图页（含 <img>）视为有内容，不参与合并
+// 无正文的章节：没有文本，或只有标题；插图页（含图片）视为有内容，不参与合并。
+// 注意：是否含图优先用原始内容算出的 hasImages 判断，而不是已经内联过图片的 content：
+// 按章解析（imageChapterIndex）时只有目标章节的图会被内嵌，用 content 判断会让同一个
+// 章节在两次解析里一个被合并、一个不被合并，章节下标就错开了（/bookinfo 与 /content 对不上）。
 function isTitleOnlyChapter(chapter) {
-  if (/<img\b/i.test(String(chapter.content || ''))) {
+  const hasImages = typeof chapter.hasImages === 'boolean'
+    ? chapter.hasImages
+    : /<(?:img|image)\b/i.test(String(chapter.content || ''));
+  if (hasImages) {
     return false;
   }
   const text = normalizeForCompare(chapterTextOf(chapter));
@@ -1397,6 +1408,8 @@ function parseEpubBuffer(input, options = {}) {
         id: ref.id,
         href,
         title,
+        // 是否含图按原始内容算（与图片内联、imageChapterIndex 无关），供章节合并判断使用
+        hasImages: /<(?:img|image)\b/i.test(body),
         mediaType: XHTML_MEDIA_TYPES.has(ref.mediaType) ? ref.mediaType : (ref.mediaType || 'application/xhtml+xml'),
         content: chapterHtml,
         images: chapterImages

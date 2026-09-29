@@ -43,11 +43,13 @@ Electron 应用，支持：
 - 章节内的图片（`<img>`、SVG `<image>`、CSS `url(...)`）默认转成 `data:<mime>;base64,...` 嵌在返回的 HTML 中（HTTP 与 IPC 都是，见「正文图片地址」一节；想要绝对地址传 `imageMode: 'url'` / `?images=url`）
   - **默认不设总量上限**：一本 340 张图的 85 MB 书若选 base64 会内嵌约 72 MB（图片只做 base64，不做压缩转换）
   - **整本一次性解析不会爆内存**：`/content` 只解析请求的那一章（`/bookinfo` 的链接带 `&index=`，解析时只给这一章生成图片，其余章节只保留结构）
+  - **按章解析不改变章节结构**：判断章节「有没有图片」用的是**原始**内容（`chapter.hasImages`），不是已经内联过图片的 HTML，因此章节合并/数量/标题与整本解析完全一致。否则同一本书两次解析的章节下标会错位（`/bookinfo` 给的下标到了 `/content` 变成另一章，那一章的图片也就不是 base64 了）
   - 单张图片上限 8 MB（`maxImageBytes`），更大的单张图会跳过并计入 `skippedImages`；`maxInlineImageBytes` 给正数时才启用整本总量预算（超限的图片会改用按需地址或跳过）
   - **字体等非图片资源默认不内嵌**：同一字体常被多章引用，base64 会在每章重复一份（某本书光字体就 23 MB）→ 统一改为按需地址，需要旧行为可传 `inlineFonts: true`
   - 图片地址可选：`imageMode: 'url'`（默认给绝对地址）、`'inline'`（base64）、`'none'`；未保存的解析（没有书籍 id）会退到 `ebook-assets` 磁盘缓存，返回 `/ebook-assets/<sha1>.<ext>` 的绝对地址
   - 统计在 `stats` 里：`imageMode`（`inline`/`url`/`none`）、`imageCount`（引用张数）、`inlinedImages`（base64 张数）、`imageBytes`、`skippedImages`（改用按需或跳过）
 - **正文图片直接内联展示**：多看书系等 EPUB 会把插图/注号图包成 `<sup><a href="..."><img/></a></sup>`，解析时会把这类「只包图片」的 `sup`/`sub`/`a` 包裹层去掉，只保留 `<img>` 本身（带文字的正常链接不动）；可用 `unwrapImages: false` 关闭
+- **单图 `<svg><image>` 一律换成 `<img>`**：Calibre 导出的封面页常用 `<svg><image xlink:href="..."/></svg>`，阅读器渲染不了这种写法，现在不管有没有内嵌成功都输出固定格式的 `<img>`（未内嵌时保留原相对地址，按章解析时不再出现“同一页在两次解析里一个变成 `<img>` 一个还是 `<svg>`”的差异）
 - **懒加载图片（微信读书等导出）**：`<img data-src="..." src="占位/相对路径">` 这类写法里，base64 写进真正的 `src`；`src` 是空值或 1×1 占位图时会改用 `data-src` / `data-original` 等属性指向的书内图片。这些懒加载候选属性（含 `srcset`）**在所有情况下都会被清掉**（输出就是上面的固定格式）——legado 的 `HtmlFormatter.formatKeepImg()` 只要发现有 `data-src` / `data-original` 就只认它，`src` 里放什么都不管
 - **封面不内嵌 base64，一律以 URL 形式提供**：
   - 仅解析（未保存）时封面写入缓存目录，返回 `http://localhost:3000/epub-covers/<sha1>.<ext>`

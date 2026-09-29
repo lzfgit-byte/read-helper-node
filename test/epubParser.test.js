@@ -500,6 +500,71 @@ test('resolves relative image paths and svg wrappers', () => {
   );
 });
 
+// 单图 SVG 封面页 + 下一章有正文（章节合并会被触发）
+function createSvgCoverEpub() {
+  return createZip([
+    { name: 'mimetype', data: 'application/epub+zip' },
+    { name: 'META-INF/container.xml', data: CONTAINER_XML, compress: true },
+    {
+      name: 'OEBPS/content.opf',
+      data: `<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="bookid">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>SVG 封面</dc:title>
+    <dc:identifier id="bookid">urn:uuid:svgcover</dc:identifier>
+  </metadata>
+  <manifest>
+    <item id="cover" href="cover.xhtml" media-type="application/xhtml+xml"/>
+    <item id="ch1" href="chapter1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="pic" href="images/pic.png" media-type="image/png"/>
+  </manifest>
+  <spine><itemref idref="cover"/><itemref idref="ch1"/></spine>
+</package>`,
+      compress: true
+    },
+    { name: 'OEBPS/images/pic.png', data: PNG_BUFFER },
+    {
+      name: 'OEBPS/cover.xhtml',
+      data: `<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml"><body>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 600 800" width="100%" height="100%">
+  <image width="600" height="800" xlink:href="images/pic.png"/>
+</svg>
+</body></html>`,
+      compress: true
+    },
+    {
+      name: 'OEBPS/chapter1.xhtml',
+      data: `<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml"><body>
+<h1>出发</h1>
+<p>正文第一段。</p>
+<p><img src="images/pic.png" alt="插图"/></p>
+</body></html>`,
+      compress: true
+    }
+  ]);
+}
+
+test('keeps the chapter structure identical when only one chapter is inlined', () => {
+  const epub = createSvgCoverEpub();
+  const full = parseEpubBuffer(epub);
+  const gated = parseEpubBuffer(epub, {
+    imageChapterIndex: 1,
+    imageChapterHref: 'OEBPS/chapter1.xhtml'
+  });
+
+  // /bookinfo 用的是整本解析的下标，/content 用 imageChapterIndex 只解析那一章：
+  // 两者的章节数量与标题必须一致，否则阅读器点开某章拿到的其实是别的章节（图片也不是 base64）
+  assert.equal(gated.chapters.length, full.chapters.length, '按章解析不能改变章节数量');
+  assert.deepEqual(gated.chapters.map((chapter) => chapter.title), full.chapters.map((chapter) => chapter.title));
+  assert.ok(gated.chapters[1].content.includes(`src="data:image/png;base64,${PNG_BASE64}"`), '目标章节内嵌 base64');
+  assert.equal(gated.stats.inlinedImages, 1, '只给目标章节生成图片数据');
+  // 未请求的章节不内嵌，但 SVG 封面同样换成统一格式的 <img>（地址保持原样）
+  assert.ok(gated.chapters[0].content.includes('src="images/pic.png"'), '未请求章节保留原地址');
+  assertContentImageTag((gated.chapters[0].content.match(/<img\b[^>]*>/) || [''])[0], '（SVG 封面）');
+});
+
 test('unwraps images from sup/a wrappers so they render inline', () => {
   const files = [
     { name: 'mimetype', data: 'application/epub+zip' },
